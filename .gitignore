@@ -1,4 +1,17 @@
 node_modules/
+dist/
 unpackage/
+
+# 编辑器和 IDE 的本地配置，不适合提交到公开仓库
 .hbuilderx/
+.vscode/
+.idea/
+
+# 本地环境变量和调试日志，避免把个人配置或排查信息上传到 GitHub
+.env
+.env.*
+*.log
+
+# 系统生成文件
 .DS_Store
+Thumbs.db
