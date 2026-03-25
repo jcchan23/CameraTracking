@@ -1,0 +1,123 @@
+import {
+  MARKER_MAX_SCALE,
+  MARKER_MIN_SCALE,
+  MARKER_REFERENCE_SIZE,
+  MARKER_TRANSITION_FACTOR,
+  NO_HANDS_GRACE_COUNT,
+  TRACKING_STATE_ERROR,
+  TRACKING_STATE_IDLE,
+  TRACKING_STATE_NO_HANDS,
+  TRACKING_STATE_RUNNING,
+  TRACKING_STATE_STARTING,
+  resolveStatusText
+} from './constants.uts'
+import { clamp } from './math.uts'
+import { HandPoint, TrackingFrame, TrackingRuntimeInfo, TrackingSnapshot } from './models.uts'
+
+/**
+ * 页面展示状态组织器。
+ *
+ * 页面层只需要把适配器产出的统一帧数据交给它，
+ * 它会负责更新状态文案、无手宽限计数和圆点平滑缩放。
+ *
+ * 它存在的意义是把“检测结果”和“页面体验规则”分开：
+ * - detector 只负责告诉我们这一帧看到了什么；
+ * - presenter 负责决定页面此刻应该怎么显示。
+ */
+export class TrackingPresenter {
+  private trackingState : string = TRACKING_STATE_IDLE
+  private runtimeInfo : TrackingRuntimeInfo = new TrackingRuntimeInfo()
+  private currentFrame : TrackingFrame = new TrackingFrame()
+  private noHandsFrameCount : number = 0
+  private leftScaleProxy : number = MARKER_REFERENCE_SIZE
+  private rightScaleProxy : number = MARKER_REFERENCE_SIZE
+
+  markStarting() : void {
+    this.trackingState = TRACKING_STATE_STARTING
+  }
+
+  markError(message : string) : void {
+    this.trackingState = TRACKING_STATE_ERROR
+    this.runtimeInfo.message = message
+  }
+
+  reset() : void {
+    this.trackingState = TRACKING_STATE_IDLE
+    this.runtimeInfo = new TrackingRuntimeInfo()
+    this.currentFrame = new TrackingFrame()
+    this.noHandsFrameCount = 0
+    this.leftScaleProxy = MARKER_REFERENCE_SIZE
+    this.rightScaleProxy = MARKER_REFERENCE_SIZE
+  }
+
+  applyFrame(frame : TrackingFrame, runtimeInfo : TrackingRuntimeInfo | null = null) : void {
+    this.currentFrame = frame
+
+    if (runtimeInfo != null) {
+      this.runtimeInfo = runtimeInfo!
+    }
+
+    if (frame.leftHand == null) {
+      this.leftScaleProxy = MARKER_REFERENCE_SIZE
+    }
+
+    if (frame.rightHand == null) {
+      this.rightScaleProxy = MARKER_REFERENCE_SIZE
+    }
+
+    this.updatePresence(frame)
+  }
+
+  private updatePresence(frame : TrackingFrame) : void {
+    const hasHands = frame.leftHand != null || frame.rightHand != null
+    if (hasHands) {
+      this.noHandsFrameCount = 0
+      this.trackingState = TRACKING_STATE_RUNNING
+      return
+    }
+
+    /**
+     * 这里不在单帧漏检时立即切到 no-hands，
+     * 是为了避免模型短暂抖动时，页面状态和 marker 展示频繁闪烁。
+     */
+    this.noHandsFrameCount += 1
+    if (this.noHandsFrameCount >= NO_HANDS_GRACE_COUNT) {
+      this.trackingState = TRACKING_STATE_NO_HANDS
+    }
+  }
+
+  resolveScale(handKey : string, hand : HandPoint | null) : number {
+    if (hand == null) {
+      return 1
+    }
+
+    /**
+     * scale 不直接使用当前帧瞬时 size，
+     * 而是用一个代理值做平滑过渡。
+     * 这样手靠近或远离镜头时，marker 大小变化会更自然。
+     */
+    const nextSize = hand.size > 0 ? hand.size : MARKER_REFERENCE_SIZE
+
+    if (handKey == 'left') {
+      this.leftScaleProxy = this.leftScaleProxy + ((nextSize - this.leftScaleProxy) * MARKER_TRANSITION_FACTOR)
+      return clamp(this.leftScaleProxy / MARKER_REFERENCE_SIZE, MARKER_MIN_SCALE, MARKER_MAX_SCALE)
+    }
+
+    this.rightScaleProxy = this.rightScaleProxy + ((nextSize - this.rightScaleProxy) * MARKER_TRANSITION_FACTOR)
+    return clamp(this.rightScaleProxy / MARKER_REFERENCE_SIZE, MARKER_MIN_SCALE, MARKER_MAX_SCALE)
+  }
+
+  createSnapshot() : TrackingSnapshot {
+    const snapshot = new TrackingSnapshot()
+    snapshot.trackingState = this.trackingState
+    snapshot.statusText = resolveStatusText(this.trackingState)
+    snapshot.backendText = this.runtimeInfo.backendLabel
+    snapshot.fpsText = this.runtimeInfo.fpsLabel
+    snapshot.resolutionText = this.runtimeInfo.resolutionLabel
+    snapshot.runtimeMessage = this.runtimeInfo.message
+    snapshot.frame = this.currentFrame
+    snapshot.leftScale = this.resolveScale('left', this.currentFrame.leftHand)
+    snapshot.rightScale = this.resolveScale('right', this.currentFrame.rightHand)
+    return snapshot
+  }
+}

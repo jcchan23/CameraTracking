@@ -1,0 +1,181 @@
+import { DetectedHand, StabilizedHands } from './models.uts'
+
+/**
+ * 左右手稳定分配器。
+ *
+ * 模型输出在真实场景中可能出现 handedness 单帧翻转，
+ * 因此这里沿用 v1 的思路，结合历史位置连续性做稳定分配。
+ *
+ * 这部分逻辑放在 shared 层而不是 detector 层，原因是：
+ * - H5 和 Android 都会遇到左右手标签抖动问题；
+ * - 这属于“页面消费检测结果之前的统一业务规则”，而不是某个模型 SDK 的特性。
+ */
+export class HandAssignmentStabilizer {
+  private lastLeft : DetectedHand | null = null
+  private lastRight : DetectedHand | null = null
+  private pendingSwitchKey : string = ''
+  private pendingSwitchFrames : number = 0
+  private readonly confirmFrames : number = 2
+
+  reset() : void {
+    this.lastLeft = null
+    this.lastRight = null
+    this.pendingSwitchKey = ''
+    this.pendingSwitchFrames = 0
+  }
+
+  stabilize(rawHands : Array<DetectedHand>) : StabilizedHands {
+    if (rawHands.length == 0) {
+      this.pendingSwitchKey = ''
+      this.pendingSwitchFrames = 0
+      return this.mapHandsByCurrentLabel(rawHands)
+    }
+
+    if (this.lastLeft == null && this.lastRight == null) {
+      const initialHands = this.mapHandsByCurrentLabel(rawHands)
+      this.rememberHands(initialHands)
+      return initialHands
+    }
+
+    const remainingHands = rawHands.slice()
+    let nextLeft : DetectedHand | null = null
+    let nextRight : DetectedHand | null = null
+
+    if (this.lastLeft != null) {
+      nextLeft = this.pickClosestHand(this.lastLeft!, remainingHands)
+    }
+
+    if (this.lastRight != null) {
+      nextRight = this.pickClosestHand(this.lastRight!, remainingHands)
+    }
+
+    for (let i = 0; i < remainingHands.length; i++) {
+      const hand = remainingHands[i]
+      if (nextLeft == null && hand.label == 'left') {
+        nextLeft = hand
+        continue
+      }
+
+      if (nextRight == null && hand.label == 'right') {
+        nextRight = hand
+        continue
+      }
+
+      if (nextLeft == null) {
+        nextLeft = hand
+        continue
+      }
+
+      if (nextRight == null) {
+        nextRight = hand
+      }
+    }
+
+    const candidateHands = this.confirmLabelSwitch(nextLeft, nextRight, rawHands)
+    this.rememberHands(candidateHands)
+    return candidateHands
+  }
+
+  private rememberHands(nextHands : StabilizedHands) : void {
+    this.lastLeft = nextHands.left
+    this.lastRight = nextHands.right
+  }
+
+  private mapHandsByCurrentLabel(hands : Array<DetectedHand>) : StabilizedHands {
+    let left : DetectedHand | null = null
+    let right : DetectedHand | null = null
+
+    for (let i = 0; i < hands.length; i++) {
+      const hand = hands[i]
+      if (hand.label == 'left') {
+        if (left == null || hand.confidence >= left.confidence) {
+          left = hand
+        }
+      } else if (hand.label == 'right') {
+        if (right == null || hand.confidence >= right.confidence) {
+          right = hand
+        }
+      }
+    }
+
+    const result = new StabilizedHands()
+    result.left = left
+    result.right = right
+    return result
+  }
+
+  private pickClosestHand(target : DetectedHand, remainingHands : Array<DetectedHand>) : DetectedHand | null {
+    if (remainingHands.length == 0) {
+      return null
+    }
+
+    let bestIndex = -1
+    let bestDistance = Number.MAX_VALUE
+
+    for (let i = 0; i < remainingHands.length; i++) {
+      const currentDistance = this.measureDistance(target, remainingHands[i])
+      if (currentDistance < bestDistance) {
+        bestDistance = currentDistance
+        bestIndex = i
+      }
+    }
+
+    if (bestIndex < 0) {
+      return null
+    }
+
+    return remainingHands.splice(bestIndex, 1)[0]
+  }
+
+  private confirmLabelSwitch(nextLeft : DetectedHand | null, nextRight : DetectedHand | null, rawHands : Array<DetectedHand>) : StabilizedHands {
+    let switchKey = ''
+    let switched = false
+
+    if (nextLeft != null && nextLeft.label != 'left') {
+      switched = true
+      switchKey += 'left:' + nextLeft.label
+    }
+
+    if (nextRight != null && nextRight.label != 'right') {
+      switched = true
+      switchKey += '|right:' + nextRight.label
+    }
+
+    if (!switched) {
+      this.pendingSwitchKey = ''
+      this.pendingSwitchFrames = 0
+      const result = new StabilizedHands()
+      result.left = nextLeft
+      result.right = nextRight
+      return result
+    }
+
+    if (this.pendingSwitchKey != switchKey) {
+      this.pendingSwitchKey = switchKey
+      this.pendingSwitchFrames = 1
+      return this.mapHandsByCurrentLabel(rawHands)
+    }
+
+    /**
+     * 标签翻转必须连续出现多帧才真正生效。
+     * 这样可以过滤单帧噪声，但也不会把真实的左右手交换永远压住。
+     */
+    this.pendingSwitchFrames += 1
+    if (this.pendingSwitchFrames < this.confirmFrames) {
+      return this.mapHandsByCurrentLabel(rawHands)
+    }
+
+    this.pendingSwitchKey = ''
+    this.pendingSwitchFrames = 0
+    const result = new StabilizedHands()
+    result.left = nextLeft
+    result.right = nextRight
+    return result
+  }
+
+  private measureDistance(a : DetectedHand, b : DetectedHand) : number {
+    const dx = a.centerX - b.centerX
+    const dy = a.centerY - b.centerY
+    return (dx * dx) + (dy * dy)
+  }
+}

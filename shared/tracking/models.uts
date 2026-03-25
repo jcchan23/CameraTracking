@@ -1,0 +1,85 @@
+/**
+ * 共享数据模型定义。
+ *
+ * 这里不依赖任何平台 API，只描述页面、service、平台适配层之间的统一协议。
+ * 这些模型的目标不是“完整还原 detector 的所有输出”，而是只保留页面真正消费的那部分数据。
+ */
+export class HandPoint {
+  x : number = 0
+  y : number = 0
+  confidence : number = 0
+  size : number = 0
+
+  constructor(x : number = 0, y : number = 0, confidence : number = 0, size : number = 0) {
+    this.x = x
+    this.y = y
+    this.confidence = confidence
+    this.size = size
+  }
+}
+
+export class TrackingFrame {
+  leftHand : HandPoint | null = null
+  rightHand : HandPoint | null = null
+}
+
+/**
+ * 调试面板使用的运行时信息。
+ *
+ * 它和 TrackingFrame 分开定义，是因为“手部结果”和“运行时状态”变化频率不同，
+ * 同时也方便平台层分别组织数据。
+ */
+export class TrackingRuntimeInfo {
+  backendLabel : string = '后端: --'
+  fpsLabel : string = '帧率: --'
+  resolutionLabel : string = '分辨率: --'
+  message : string = ''
+}
+
+export class TrackingViewport {
+  width : number = 0
+  height : number = 0
+
+  constructor(width : number = 0, height : number = 0) {
+    this.width = width
+    this.height = height
+  }
+}
+
+/**
+ * 原始检测结果中的单手信息。
+ *
+ * Android 与 H5 适配器都先归一化成这个结构，再交给共享算法处理。
+ * 这样 handedness 稳定、坐标钳制和页面 marker 计算都能跨端复用。
+ */
+export class DetectedHand {
+  label : string = ''
+  confidence : number = 0
+  centerX : number = 0
+  centerY : number = 0
+  size : number = 0
+}
+
+/**
+ * 页面层使用的快照结构。
+ *
+ * 页面不需要分别订阅“状态码变化”“手部结果变化”“调试信息变化”，
+ * 而是只消费这一份完整快照。
+ * 这样页面更新入口更少，也更不容易在重构时漏掉某个联动字段。
+ */
+export class TrackingSnapshot {
+  trackingState : string = ''
+  statusText : string = ''
+  backendText : string = '后端: --'
+  fpsText : string = '帧率: --'
+  resolutionText : string = '分辨率: --'
+  runtimeMessage : string = ''
+  leftScale : number = 1
+  rightScale : number = 1
+  frame : TrackingFrame = new TrackingFrame()
+}
+
+export class StabilizedHands {
+  left : DetectedHand | null = null
+  right : DetectedHand | null = null
+}

@@ -1,0 +1,158 @@
+import { TrackingFrameNormalizer } from '../../../shared/tracking/normalizer.uts'
+import { DetectedHand, TrackingRuntimeInfo, TrackingViewport } from '../../../shared/tracking/models.uts'
+import { createH5HandTrackerSession } from '../web/h5-hand-detector-adapter.js'
+
+/**
+ * H5 追踪适配层。
+ *
+ * 它负责衔接两端：
+ * - 下游：浏览器里的 JS 检测会话
+ * - 上游：TrackerService 与共享层模型
+ *
+ * 维护者可以把这里理解为“平台结果翻译层”：
+ * 页面不需要直接理解浏览器 detector 返回的数据形状，只需要接收这里整理后的结果。
+ */
+export class H5TrackerAdapter {
+  private frameNormalizer : TrackingFrameNormalizer = new TrackingFrameNormalizer()
+  private frameCallback : ((frame : any, runtime : TrackingRuntimeInfo) => void) | null = null
+  private errorCallback : ((message : string) => void) | null = null
+  private session : any = null
+
+  onFrame(callback : (frame : any, runtime : TrackingRuntimeInfo) => void) : void {
+    this.frameCallback = callback
+  }
+
+  onError(callback : (message : string) => void) : void {
+    this.errorCallback = callback
+  }
+
+  /**
+   * 启动 H5 检测适配器。
+   *
+   * 核心步骤：
+   * 1. 先 stop，防止重复启动留下旧会话；
+   * 2. 重置 normalizer，避免上一轮左右手历史影响下一轮；
+   * 3. 创建 H5 检测会话；
+   * 4. 把 JS 层回调映射成共享层 frame 和 runtime 信息。
+   *
+   * 修改注意：
+   * - 这里不要把页面状态逻辑掺进来；
+   * - 页面状态统一交给 TrackerService 和 presenter 处理。
+   */
+  start(viewport : TrackingViewport) : void {
+    this.stop()
+    this.frameNormalizer.reset()
+
+    this.session = createH5HandTrackerSession()
+    this.session.start({
+      viewportProvider: () => {
+        const width = typeof window !== 'undefined' ? Number(window.innerWidth) : viewport.width
+        const height = typeof window !== 'undefined' ? Number(window.innerHeight) : viewport.height
+        return {
+          width,
+          height
+        }
+      },
+      onFrame: (payload : any) => {
+        const rawHands = this.mapDetectedHands(payload != null ? payload.hands : [])
+        const runtime = this.mapRuntimeInfo(payload != null ? payload.runtime : null, viewport)
+        const nextFrame = this.frameNormalizer.normalizeHands(rawHands, viewport)
+        this.emitFrame(nextFrame, runtime)
+      },
+      onError: (message : string) => {
+        this.emitError(message)
+      }
+    })
+    return
+  }
+
+  stop() : void {
+    if (this.session != null) {
+      this.session.stop()
+      this.session = null
+    }
+  }
+
+  /**
+   * 把 JS 会话层返回的松散 hands 数组重建为 DetectedHand。
+   *
+   * 输入：
+   * - sourceHands：浏览器 detector 经 JS 层整理后的对象数组
+   *
+   * 输出：
+   * - 共享层稳定使用的 DetectedHand 数组
+   *
+   * 为什么这样做：
+   * - 共享层不应该依赖浏览器对象的松散字段；
+   * - 这里集中处理字段缺失和类型转换，后续 detector 结构有变化时更容易维护。
+   */
+  private mapDetectedHands(sourceHands : Array<any>) : Array<DetectedHand> {
+    const list = [] as Array<DetectedHand>
+    for (let i = 0; i < sourceHands.length; i++) {
+      const source = sourceHands[i]
+      if (source == null) {
+        continue
+      }
+
+      const hand = new DetectedHand()
+      hand.label = source.label != null ? String(source.label) : ''
+      hand.confidence = source.confidence != null ? Number(source.confidence) : 0
+      hand.centerX = source.centerX != null ? Number(source.centerX) : 0
+      hand.centerY = source.centerY != null ? Number(source.centerY) : 0
+      hand.size = source.size != null ? Number(source.size) : 0
+      list.push(hand)
+    }
+
+    return list
+  }
+
+  /**
+   * 整理调试面板使用的运行时信息。
+   *
+   * 这里故意提供稳定默认值，原因是页面调试区域不适合到处判空：
+   * - 后端默认 CPU
+   * - 帧率与分辨率默认使用当前可得信息
+   * - message 默认链路运行中
+   *
+   * 这样页面始终可以拿到完整字符串，避免模板层出现额外分支。
+   */
+  private mapRuntimeInfo(runtimeSource : any, viewport : TrackingViewport) : TrackingRuntimeInfo {
+    const runtime = new TrackingRuntimeInfo()
+    const backendName = runtimeSource != null && runtimeSource.backendName != null ? String(runtimeSource.backendName) : 'CPU'
+    runtime.backendLabel = runtimeSource != null && runtimeSource.backendLabel != null
+      ? String(runtimeSource.backendLabel)
+      : ('后端: ' + backendName)
+    runtime.fpsLabel = runtimeSource != null && runtimeSource.fpsLabel != null
+      ? String(runtimeSource.fpsLabel)
+      : '帧率: --'
+    runtime.resolutionLabel = runtimeSource != null && runtimeSource.resolutionLabel != null
+      ? String(runtimeSource.resolutionLabel)
+      : ('分辨率: ' + viewport.width + 'x' + viewport.height)
+    runtime.message = runtimeSource != null && runtimeSource.message != null ? String(runtimeSource.message) : 'H5 检测链路运行中。'
+    return runtime
+  }
+
+  /**
+   * 统一触发 frame 回调，避免在多个分支里直接操作可空字段。
+   */
+  private emitFrame(frame : any, runtime : TrackingRuntimeInfo) : void {
+    const callback = this.frameCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(frame, runtime)
+  }
+
+  /**
+   * 统一触发 error 回调，减少 UTS 对可空函数字段调用的误判。
+   */
+  private emitError(message : string) : void {
+    const callback = this.errorCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(message)
+  }
+}

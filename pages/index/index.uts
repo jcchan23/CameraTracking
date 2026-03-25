@@ -1,0 +1,282 @@
+import { ref } from 'vue'
+import { ORIENTATION_MASK_TEXT } from '../../shared/tracking/constants.uts'
+import { clamp } from '../../shared/tracking/math.uts'
+import { HandPoint, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
+import { TrackerService } from '../../services/tracker/tracker-service.uts'
+
+/**
+ * 页面级共享实例与响应式状态。
+ *
+ * 这一段可以理解为“页面的大脑和记忆区”：
+ * - trackingService 负责和底层追踪链路打交道；
+ * - ref 状态负责把服务结果变成页面可直接绑定的字段。
+ *
+ * 对不熟悉 JS/UTS 的维护者来说，可以把这里看成“页面所有可见状态的总表”。
+ * 后面模板里看到的字段，几乎都在这里定义。
+ */
+const trackingService = new TrackerService()
+
+const orientationMaskText = ref(ORIENTATION_MASK_TEXT)
+const shouldBlockForOrientation = ref(false)
+const trackingState = ref('idle')
+const statusText = ref('等待启动')
+const backendText = ref('后端: --')
+const fpsText = ref('帧率: --')
+const resolutionText = ref('分辨率: --')
+const runtimeMessage = ref('等待追踪服务启动。')
+const runtimeChipClass = ref('runtime-chip-idle')
+
+const pageReady = ref(false)
+const trackingStarted = ref(false)
+
+const leftMarkerVisible = ref(false)
+const rightMarkerVisible = ref(false)
+const leftGlowVisible = ref(false)
+const rightGlowVisible = ref(false)
+const leftMarkerStyle = ref('')
+const rightMarkerStyle = ref('')
+const leftGlowStyle = ref('')
+const rightGlowStyle = ref('')
+
+trackingService.onSnapshot((snapshot : TrackingSnapshot) => {
+  applyTrackingSnapshot(snapshot)
+})
+
+/**
+ * 快照驱动的页面状态同步入口。
+ *
+ * 输入：
+ * - TrackingService 产出的 TrackingSnapshot。
+ *
+ * 输出：
+ * - 更新页面模板直接使用的响应式字段。
+ *
+ * 为什么这样做：
+ * - 页面只消费一份“整理好的快照”，不直接依赖 detector 的原始输出；
+ * - 后续即使适配器、模型或平台分支有变化，页面层仍然只改这一处映射。
+ *
+ * 修改注意：
+ * - 如果新增页面展示字段，优先从 snapshot 继续下发，不要让模板越过页面层直接读服务内部状态。
+ */
+function applyTrackingSnapshot(snapshot : TrackingSnapshot) : void {
+  trackingState.value = snapshot.trackingState
+  statusText.value = snapshot.statusText
+  backendText.value = snapshot.backendText
+  fpsText.value = snapshot.fpsText
+  resolutionText.value = snapshot.resolutionText
+  runtimeMessage.value = snapshot.runtimeMessage.length > 0 ? snapshot.runtimeMessage : '等待追踪服务启动。'
+  runtimeChipClass.value = resolveRuntimeChipClass(snapshot.backendText)
+  syncMarkerPresentation(snapshot)
+}
+
+/**
+ * 根据快照同步左右手 marker 的显示状态。
+ *
+ * 输入：
+ * - snapshot.frame 里的左右手结果
+ * - snapshot.leftScale / snapshot.rightScale 里的平滑缩放值
+ *
+ * 输出：
+ * - 四个“是否显示”的布尔值
+ * - 四个直接给模板用的 style 字符串
+ *
+ * 为什么拆成单独函数：
+ * - 页面里最容易频繁调整的是 marker 表现；
+ * - 把 marker 同步逻辑集中后，后续改样式或显示规则时不容易漏字段。
+ */
+function syncMarkerPresentation(snapshot : TrackingSnapshot) : void {
+  leftMarkerVisible.value = snapshot.frame.leftHand != null
+  rightMarkerVisible.value = snapshot.frame.rightHand != null
+  leftGlowVisible.value = snapshot.frame.leftHand != null
+  rightGlowVisible.value = snapshot.frame.rightHand != null
+
+  leftMarkerStyle.value = buildMarkerStyle(snapshot.frame.leftHand, snapshot.leftScale, false)
+  rightMarkerStyle.value = buildMarkerStyle(snapshot.frame.rightHand, snapshot.rightScale, false)
+  leftGlowStyle.value = buildMarkerStyle(snapshot.frame.leftHand, snapshot.leftScale, true)
+  rightGlowStyle.value = buildMarkerStyle(snapshot.frame.rightHand, snapshot.rightScale, true)
+}
+
+/**
+ * 生成单个 marker 的内联样式字符串。
+ *
+ * 输入：
+ * - hand：单只手在页面中的位置和 size 代理值
+ * - scale：已经平滑过的缩放倍数
+ * - glow：当前是发光层还是实心层
+ *
+ * 输出：
+ * - 直接写入模板 `:style` 的字符串
+ *
+ * 核心步骤：
+ * 1. 根据 glow 决定当前圆点尺寸；
+ * 2. 用手中心点减去半径，算出 left / top；
+ * 3. 用 clamp 保证圆点不会越出屏幕边界。
+ *
+ * 这个函数不要轻易改成在模板里做表达式运算，
+ * 否则样式逻辑会重新分散到模板各处，维护成本会明显变高。
+ */
+function buildMarkerStyle(hand : HandPoint | null, scale : number, glow : boolean) : string {
+  if (hand == null) {
+    return ''
+  }
+
+  const size = glow ? (36 * scale) : (18 * scale)
+  const left = clamp(hand.x - (size / 2), 0, 99999)
+  const top = clamp(hand.y - (size / 2), 0, 99999)
+  return 'left:' + left + 'px;top:' + top + 'px;width:' + size + 'px;height:' + size + 'px;'
+}
+
+function resolveRuntimeChipClass(backendLabel : string) : string {
+  if (backendLabel.indexOf('GPU') >= 0) {
+    return 'runtime-chip-gpu'
+  }
+
+  if (backendLabel.indexOf('CPU') >= 0 || backendLabel.indexOf('Android 原生') >= 0) {
+    return 'runtime-chip-cpu'
+  }
+
+  return 'runtime-chip-idle'
+}
+
+/**
+ * 读取当前页面可用视口尺寸。
+ *
+ * 这里统一从 uni.getSystemInfoSync() 取 windowWidth / windowHeight，
+ * 是为了让横竖屏判断、marker 坐标计算和启动逻辑都基于同一套尺寸来源。
+ */
+function readViewport() : TrackingViewport {
+  // @ts-ignore uni-app x 运行时会注入 uni 全局对象
+  const systemInfo = uni.getSystemInfoSync()
+  return new TrackingViewport(Number(systemInfo.windowWidth), Number(systemInfo.windowHeight))
+}
+
+/**
+ * 横竖屏策略同步入口。
+ *
+ * 当前项目已经回到 uni-app x 的 H5 单端结构，
+ * 所以这里直接按当前视口宽高判断是否需要进入横屏遮罩。
+ */
+function syncOrientationState() : void {
+  const viewport = readViewport()
+  const nextLandscape = viewport.width >= viewport.height
+  shouldBlockForOrientation.value = !nextLandscape
+
+  if (!nextLandscape) {
+    stopTrackingFlow()
+  }
+}
+
+/**
+ * 统一刷新页面视口相关状态，并在需要时触发启动。
+ *
+ * 这个函数是页面的“总刷新入口”：
+ * - 页面 ready / show / resize 时都走这里；
+ * - 先同步横竖屏状态，再决定是否允许启动追踪。
+ */
+function refreshTrackingViewport(allowStart : boolean = false) : void {
+  syncOrientationState()
+
+  if (allowStart && !shouldBlockForOrientation.value) {
+    startTrackingFlow()
+  }
+}
+
+/**
+ * 启动追踪流程。
+ *
+ * 关键保护条件：
+ * - 页面还没 ready，不启动；
+ * - 当前仍被横屏策略阻塞，不启动；
+ * - 已经启动过，不重复启动。
+ *
+ * 这些判断不能随便删，否则最容易出现重复申请摄像头、重复创建 detector
+ * 或页面状态和底层追踪状态不一致的问题。
+ */
+function startTrackingFlow() : void {
+  if (!pageReady.value || shouldBlockForOrientation.value || trackingStarted.value) {
+    return
+  }
+
+  trackingStarted.value = true
+  trackingService.start(readViewport())
+}
+
+/**
+ * 停止追踪流程的统一收口入口。
+ *
+ * 任何需要停止追踪的场景都应该走这里：
+ * - 切后台
+ * - 卸载页面
+ * - 原生端切回非横屏
+ *
+ * 这样可以保证页面状态、预览状态和底层服务的停止动作始终一致。
+ */
+function stopTrackingFlow() : void {
+  if (!trackingStarted.value) {
+    applyTrackingSnapshot(trackingService.getSnapshot())
+    return
+  }
+
+  trackingStarted.value = false
+  trackingService.stop()
+}
+
+/**
+ * 页面生命周期处理函数。
+ *
+ * 这些函数本身很薄，目的是让 `index.uvue` 只负责生命周期绑定，
+ * 真正的行为仍然集中在当前逻辑文件里。
+ */
+function handlePageReady() : void {
+  pageReady.value = true
+  refreshTrackingViewport(true)
+}
+
+function handlePageShow() : void {
+  refreshTrackingViewport(true)
+}
+
+function handlePageHide() : void {
+  stopTrackingFlow()
+}
+
+function handlePageUnload() : void {
+  stopTrackingFlow()
+}
+
+function handlePageResize() : void {
+  refreshTrackingViewport(true)
+}
+
+export function useTrackingPage() {
+  /**
+   * 页面唯一对外暴露的逻辑入口。
+   *
+   * `index.uvue` 只通过这里拿模板字段和生命周期处理函数。
+   * 这样做能把“页面长什么样”和“页面怎么跑”分开，便于维护者定位问题。
+   */
+  return {
+    orientationMaskText,
+    shouldBlockForOrientation,
+    trackingState,
+    statusText,
+    backendText,
+    fpsText,
+    resolutionText,
+    runtimeMessage,
+    runtimeChipClass,
+    leftMarkerVisible,
+    rightMarkerVisible,
+    leftGlowVisible,
+    rightGlowVisible,
+    leftMarkerStyle,
+    rightMarkerStyle,
+    leftGlowStyle,
+    rightGlowStyle,
+    handlePageReady,
+    handlePageShow,
+    handlePageHide,
+    handlePageUnload,
+    handlePageResize
+  }
+}

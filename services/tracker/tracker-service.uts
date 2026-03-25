@@ -1,0 +1,103 @@
+import { TrackingPresenter } from '../../shared/tracking/presenter.uts'
+import { TrackingRuntimeInfo, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
+import { H5TrackerAdapter } from './adapters/h5-tracker-adapter.uts'
+
+/**
+ * 追踪服务层。
+ *
+ * 它位于“页面”和“平台适配器”之间，负责把底层结果整理成页面能直接消费的快照。
+ * 页面层不需要知道底层追踪会话如何实现，只需要和这个服务交互。
+ *
+ * 修改注意：
+ * - 页面相关字段尽量继续通过 TrackingSnapshot 下发；
+ * - 不要让页面直接越过服务层去依赖具体适配器。
+ */
+export class TrackerService {
+  private presenter : TrackingPresenter = new TrackingPresenter()
+  private snapshotListener : ((snapshot : TrackingSnapshot) => void) | null = null
+  private activeAdapter : any = null
+  private started : boolean = false
+
+  onSnapshot(callback : (snapshot : TrackingSnapshot) => void) : void {
+    this.snapshotListener = callback
+  }
+
+  getSnapshot() : TrackingSnapshot {
+    return this.presenter.createSnapshot()
+  }
+
+  /**
+   * 启动追踪服务。
+   *
+   * 输入：
+   * - viewport：当前页面的可视区域尺寸
+   *
+   * 核心步骤：
+   * 1. 标记服务已启动；
+   * 2. 立即发布“启动中”快照，让页面先进入过渡状态；
+   * 3. 选择当前平台对应的适配器；
+   * 4. 监听 frame / error，再把结果交给 presenter。
+   */
+  start(viewport : TrackingViewport) : void {
+    if (this.started) {
+      return
+    }
+
+    this.started = true
+    this.presenter.markStarting()
+    this.publishSnapshot()
+    this.activeAdapter = this.createAdapter()
+    this.activeAdapter.onFrame((frame : any, runtime : TrackingRuntimeInfo) => {
+      this.presenter.applyFrame(frame, runtime)
+      this.publishSnapshot()
+    })
+    this.activeAdapter.onError((message : string) => {
+      this.presenter.markError(message)
+      this.publishSnapshot()
+    })
+
+    this.activeAdapter.start(viewport)
+  }
+
+  stop() : void {
+    if (this.activeAdapter != null) {
+      this.activeAdapter.stop()
+      this.activeAdapter = null
+    }
+
+    this.started = false
+    this.presenter.reset()
+    this.publishSnapshot()
+  }
+
+  /**
+   * 把 presenter 生成的最新快照推给页面监听者。
+   *
+   * 这里单独封装成函数，是为了保证页面拿到快照的时机统一，
+   * 后续如果增加埋点、日志或节流策略，也只需要改这一处。
+   */
+  private publishSnapshot() : void {
+    this.emitSnapshot(this.presenter.createSnapshot())
+  }
+
+  /**
+   * 统一触发快照回调，避免在多个位置直接调用可空监听器字段。
+   */
+  private emitSnapshot(snapshot : TrackingSnapshot) : void {
+    const listener = this.snapshotListener
+    if (listener == null) {
+      return
+    }
+
+    listener(snapshot)
+  }
+
+  /**
+   * 按当前平台选择适配器。
+   *
+   * 当前工程只保留 H5 追踪链路，因此这里直接返回 H5 适配器。
+   */
+  private createAdapter() : any {
+    return new H5TrackerAdapter()
+  }
+}

@@ -1,0 +1,56 @@
+import { clamp } from './math.uts'
+import { DetectedHand, HandPoint, StabilizedHands, TrackingFrame, TrackingViewport } from './models.uts'
+import { HandAssignmentStabilizer } from './stabilizer.uts'
+
+/**
+ * 检测结果归一化器。
+ *
+ * 平台适配层只需要把原始检测结果先映射成 DetectedHand 数组，
+ * 然后调用这里，就能得到页面可以直接消费的 TrackingFrame。
+ *
+ * 这里刻意只做两类事情：
+ * 1. handedness 稳定分配；
+ * 2. 坐标与 size 的统一归一化。
+ *
+ * 这样平台层保持“尽量薄”，而真正影响页面表现的一致性逻辑都沉到 shared 层。
+ */
+export class TrackingFrameNormalizer {
+  private stabilizer : HandAssignmentStabilizer = new HandAssignmentStabilizer()
+
+  reset() : void {
+    this.stabilizer.reset()
+  }
+
+  normalizeHands(rawHands : Array<DetectedHand>, viewport : TrackingViewport) : TrackingFrame {
+    const stabilizedHands = this.stabilizer.stabilize(rawHands)
+    return this.buildFrame(stabilizedHands, viewport)
+  }
+
+  /**
+   * 页面真正只认识左右手两路数据，
+   * 因此这里把稳定化后的结果直接折叠成固定形状的 TrackingFrame。
+   */
+  private buildFrame(hands : StabilizedHands, viewport : TrackingViewport) : TrackingFrame {
+    const frame = new TrackingFrame()
+    frame.leftHand = this.normalizeSingleHand(hands.left, viewport)
+    frame.rightHand = this.normalizeSingleHand(hands.right, viewport)
+    return frame
+  }
+
+  private normalizeSingleHand(rawHand : DetectedHand | null, viewport : TrackingViewport) : HandPoint | null {
+    if (rawHand == null) {
+      return null
+    }
+
+    /**
+     * 这里再次做 clamp，是为了确保无论上游 detector 给出怎样的边界值，
+     * 页面层拿到的坐标都不会越出当前视口。
+     */
+    return new HandPoint(
+      clamp(rawHand.centerX, 0, viewport.width),
+      clamp(rawHand.centerY, 0, viewport.height),
+      rawHand.confidence,
+      rawHand.size
+    )
+  }
+}

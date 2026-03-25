@@ -1,0 +1,288 @@
+<template>
+	<view class="page">
+		<view v-if="shouldBlockForOrientation" class="orientation-mask">
+			<!-- 横屏提示页的装饰层：使用普通 view 模拟光斑，避免依赖 radial-gradient 等 Web 专属背景写法。 -->
+			<view class="orientation-mask-decoration orientation-mask-decoration-left"></view>
+			<view class="orientation-mask-decoration orientation-mask-decoration-right"></view>
+			<text class="mask-title">请横屏后继续</text>
+			<text class="mask-body">{{ orientationMaskText }}</text>
+		</view>
+
+		<view v-else class="tracking-stage">
+			<view class="web-preview-mask"></view>
+
+			<view class="marker-layer">
+				<view v-if="leftGlowVisible" class="marker marker-glow marker-left-glow" :style="leftGlowStyle"></view>
+				<view v-if="rightGlowVisible" class="marker marker-glow marker-right-glow" :style="rightGlowStyle"></view>
+				<view v-if="leftMarkerVisible" class="marker marker-solid marker-left-solid" :style="leftMarkerStyle"></view>
+				<view v-if="rightMarkerVisible" class="marker marker-solid marker-right-solid" :style="rightMarkerStyle"></view>
+			</view>
+
+			<view class="status-panel">
+				<view class="status-chip" :class="'state-' + trackingState">
+					<text class="status-chip-text">{{ statusText }}</text>
+				</view>
+
+				<view class="runtime-chip" :class="runtimeChipClass">
+					<text class="runtime-chip-text">{{ backendText }}</text>
+				</view>
+
+				<view class="debug-chip">
+					<text class="debug-chip-line">{{ fpsText }}</text>
+					<text class="debug-chip-line">{{ resolutionText }}</text>
+					<text class="debug-chip-line">{{ runtimeMessage }}</text>
+				</view>
+			</view>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+	import { useTrackingPage } from './index.uts'
+
+	const {
+		orientationMaskText,
+		shouldBlockForOrientation,
+		trackingState,
+		statusText,
+		backendText,
+		fpsText,
+		resolutionText,
+		runtimeMessage,
+		runtimeChipClass,
+		leftMarkerVisible,
+		rightMarkerVisible,
+		leftGlowVisible,
+		rightGlowVisible,
+		leftMarkerStyle,
+		rightMarkerStyle,
+		leftGlowStyle,
+		rightGlowStyle,
+		handlePageReady,
+		handlePageShow,
+		handlePageHide,
+		handlePageUnload,
+		handlePageResize
+	} = useTrackingPage()
+
+	// @ts-ignore uni-app x 页面生命周期由运行时注入
+	onReady(() => {
+		handlePageReady()
+	})
+
+	// @ts-ignore uni-app x 页面生命周期由运行时注入
+	onShow(() => {
+		handlePageShow()
+	})
+
+	// @ts-ignore uni-app x 页面生命周期由运行时注入
+	onHide(() => {
+		handlePageHide()
+	})
+
+	// @ts-ignore uni-app x 页面生命周期由运行时注入
+	onUnload(() => {
+		handlePageUnload()
+	})
+
+	// @ts-ignore uni-app x 页面生命周期由运行时注入
+	onResize(() => {
+		handlePageResize()
+	})
+</script>
+
+<style>
+	/* 页面根层：负责承接整个页面的基础布局。 */
+	.page {
+		flex: 1;
+		background-color: transparent;
+	}
+
+	/* 主舞台层：摄像头画面、marker 与状态面板都叠加在这一层。 */
+	.tracking-stage {
+		flex: 1;
+		position: relative;
+		background-color: transparent;
+	}
+
+	/* H5 预览遮罩：只负责压一层轻微暗角，保证状态面板和 marker 更容易看清。 */
+	.web-preview-mask {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 1;
+		background: linear-gradient(180deg, rgba(8, 17, 31, 0.18) 0%, rgba(8, 17, 31, 0.08) 40%, rgba(8, 17, 31, 0.28) 100%);
+		pointer-events: none;
+	}
+
+	/* 横屏提示层：仅在原生端需要横屏时阻塞页面，H5 当前不会进入这个分支。 */
+	.orientation-mask {
+		position: relative;
+		flex: 1;
+		padding: 48rpx;
+		justify-content: center;
+		align-items: center;
+		background-image: linear-gradient(160deg, #08111f, #162033);
+		background-color: #08111f;
+		overflow: hidden;
+	}
+
+	/* 为兼容 uni-app x 的 CSS 子集，这里改用绝对定位装饰 view 模拟背景光斑。 */
+	.orientation-mask-decoration {
+		position: absolute;
+		border-radius: 999px;
+		opacity: 0.18;
+		pointer-events: none;
+	}
+
+	.orientation-mask-decoration-left {
+		left: -80rpx;
+		top: -40rpx;
+		width: 320rpx;
+		height: 320rpx;
+		background-color: rgba(59, 130, 246, 0.36);
+	}
+
+	.orientation-mask-decoration-right {
+		right: -60rpx;
+		top: -20rpx;
+		width: 260rpx;
+		height: 260rpx;
+		background-color: rgba(249, 115, 22, 0.28);
+	}
+
+	.mask-title {
+		z-index: 1;
+		margin-bottom: 16rpx;
+		font-size: 42rpx;
+		font-weight: 600;
+		color: #ffffff;
+	}
+
+	.mask-body {
+		z-index: 1;
+		width: 78%;
+		font-size: 28rpx;
+		line-height: 42rpx;
+		text-align: center;
+		color: rgba(255, 255, 255, 0.76);
+	}
+
+	/* 手部 marker 覆盖层：始终覆盖在摄像头画面上方，不参与页面布局流。 */
+	.marker-layer {
+		position: absolute;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 9;
+	}
+
+	/* marker 基础样式：位置由运行时动态计算并直接写入 style 字符串。 */
+	.marker {
+		position: absolute;
+		border-radius: 999px;
+	}
+
+	/* 发光层与实心层分离，方便既保留提示感，又不让圆点太刺眼。 */
+	.marker-glow {
+		opacity: 0.14;
+	}
+
+	.marker-solid {
+		opacity: 1;
+	}
+
+	/* 左右手分别使用不同颜色，降低维护者排查“哪只手显示异常”时的识别成本。 */
+	.marker-left-glow,
+	.marker-left-solid {
+		background-color: #1f6fff;
+	}
+
+	.marker-right-glow,
+	.marker-right-solid {
+		background-color: #ff8a1f;
+	}
+
+	/* 左上状态面板：固定在页面左上，和摄像头画面脱离布局流，避免被内容挤动。 */
+	.status-panel {
+		position: absolute;
+		left: 24rpx;
+		top: 24rpx;
+		z-index: 10;
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	/* 三种信息胶囊共用同一套基础盒模型，属于模板里静态 class 直接命中的样式。 */
+	.status-chip,
+	.runtime-chip,
+	.debug-chip {
+		margin-bottom: 14rpx;
+		padding: 16rpx 20rpx;
+		border-radius: 22rpx;
+		background-color: rgba(15, 23, 42, 0.72);
+		box-shadow: 0 14rpx 34rpx rgba(0, 0, 0, 0.16);
+	}
+
+	/* 调试块单独限制宽度，避免长文本直接铺满上方区域。 */
+	.debug-chip {
+		max-width: 430rpx;
+	}
+
+	/* 文本样式集中放在一起，维护时能快速知道字号和颜色在哪里改。 */
+	.status-chip-text,
+	.runtime-chip-text,
+	.debug-chip-line {
+		color: #ffffff;
+	}
+
+	.status-chip-text,
+	.runtime-chip-text {
+		font-size: 24rpx;
+		font-weight: 600;
+	}
+
+	/* 调试文本单独控制行高和透明度，避免和状态标题文本混在一起难找。 */
+	.debug-chip-line {
+		font-size: 22rpx;
+		line-height: 32rpx;
+		opacity: 0.88;
+	}
+
+	/* 状态颜色变体：模板里不会写完整类名，但会由 trackingState 在运行时动态命中。 */
+	.state-idle {
+		background-color: rgba(71, 85, 105, 0.86);
+	}
+
+	.state-starting {
+		background-color: rgba(14, 116, 144, 0.9);
+	}
+
+	.state-running {
+		background-color: rgba(22, 163, 74, 0.9);
+	}
+
+	.state-no-hands {
+		background-color: rgba(202, 138, 4, 0.92);
+	}
+
+	.state-error {
+		background-color: rgba(220, 38, 38, 0.92);
+	}
+
+	/* 运行时颜色变体：模板里不会写完整类名，但会由 runtimeChipClass 在运行时动态命中。 */
+	.runtime-chip-idle {
+		background-color: rgba(51, 65, 85, 0.86);
+	}
+
+	.runtime-chip-cpu {
+		background-color: rgba(59, 130, 246, 0.88);
+	}
+
+	.runtime-chip-gpu {
+		background-color: rgba(139, 92, 246, 0.9);
+	}
+</style>

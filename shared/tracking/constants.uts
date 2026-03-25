@@ -1,0 +1,58 @@
+/**
+ * 手部追踪共享常量。
+ *
+ * 这些常量来自 v1 已验证过的交互经验值。
+ * 它们不属于某个平台的私有实现，而是页面体验层的“稳定规则”，
+ * 因此迁移到 v2 后继续作为跨端共用配置保留在 shared 层。
+ */
+export const NO_HANDS_GRACE_COUNT : number = 3
+export const MARKER_REFERENCE_SIZE : number = 0.24
+export const MARKER_TRANSITION_FACTOR : number = 0.35
+export const MARKER_MIN_SCALE : number = 0.5
+export const MARKER_MAX_SCALE : number = 2.0
+
+/**
+ * 页面状态码。
+ *
+ * 这里统一使用字符串而不是 enum，
+ * 是为了让页面层、适配层和调试信息都能直接共享这组状态值。
+ */
+export const TRACKING_STATE_IDLE : string = 'idle'
+export const TRACKING_STATE_STARTING : string = 'starting'
+export const TRACKING_STATE_RUNNING : string = 'running'
+export const TRACKING_STATE_NO_HANDS : string = 'no-hands'
+export const TRACKING_STATE_ERROR : string = 'error'
+
+/**
+ * 页面展示文案映射。
+ *
+ * 文案和状态码集中维护，目的是避免页面、service、适配器各自维护一套展示词，
+ * 导致后续改文案时漏改。
+ */
+export function resolveStatusText(state : string) : string {
+  if (state == TRACKING_STATE_STARTING) {
+    return '启动中'
+  }
+
+  if (state == TRACKING_STATE_RUNNING) {
+    return '追踪中'
+  }
+
+  if (state == TRACKING_STATE_NO_HANDS) {
+    return '未检测到'
+  }
+
+  if (state == TRACKING_STATE_ERROR) {
+    return '异常'
+  }
+
+  return '等待启动'
+}
+
+/**
+ * 竖屏时的遮罩提示文案。
+ *
+ * 目前 H5 主线只服务横屏实时追踪，因此这里单独提取成常量，
+ * 让页面结构本身保持简洁。
+ */
+export const ORIENTATION_MASK_TEXT : string = '当前页面建议横屏使用。切换为横屏后会自动启动摄像头与追踪流程。'

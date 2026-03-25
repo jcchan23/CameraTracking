@@ -1,0 +1,17 @@
+import App from './App.uvue'
+import { createSSRApp } from 'vue'
+
+/**
+ * uni-app x 应用入口。
+ *
+ * 这里只保留最标准的应用创建逻辑：
+ * - 由 App.uvue 作为根组件；
+ * - 由 pages.json 管理首页与页面配置；
+ * - 不在入口层引入任何 Android 或旧 uni-app 兼容分支。
+ */
+export function createApp() {
+	const app = createSSRApp(App)
+	return {
+		app
+	}
+}

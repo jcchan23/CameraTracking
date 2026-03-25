@@ -1,0 +1,20 @@
+{
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationBarTitleText": "双手追踪",
+				"navigationStyle": "custom",
+				"pageOrientation": "landscape"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "white",
+		"navigationBarTitleText": "双手追踪",
+		"navigationBarBackgroundColor": "#08111f",
+		"backgroundColor": "#08111f",
+		"pageOrientation": "landscape"
+	},
+	"uniIdRouter": {}
+}
