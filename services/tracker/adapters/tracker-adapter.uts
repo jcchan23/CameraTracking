@@ -1,0 +1,14 @@
+import { TrackingFrame, TrackingRuntimeInfo, TrackingViewport } from '../../../shared/tracking/models.uts'
+
+/**
+ * 统一追踪适配器契约。
+ *
+ * 页面与服务层只依赖这个结构，不直接接触具体检测实现。
+ * 这样服务层的类型就能保持显式，也方便后续统一演进协议。
+ */
+export interface TrackerAdapter {
+  onFrame(callback : (frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) : void
+  onError(callback : (message : string) => void) : void
+  start(viewport : TrackingViewport) : void
+  stop() : void
+}

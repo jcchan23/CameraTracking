@@ -1,4 +1,4 @@
-import { destroyHandLandmarker, ensureHandLandmarker, getActiveDelegate } from './h5-mediapipe-loader.js'
+import { destroyHandLandmarker, ensureHandLandmarker, getActiveDelegate, prewarmHandLandmarker } from './h5-mediapipe-loader.js'
 
 /**
  * 会话级常量与预览样式配置。
@@ -67,14 +67,16 @@ export function createH5HandTrackerSession() {
         /**
          * 启动顺序不能轻易调整：
          * 1. 先确认浏览器支持摄像头；
-         * 2. 再准备 video；
-         * 3. 再申请媒体流；
-         * 4. 最后才启动 detect 调度。
+         * 2. 尽早预热 detector；
+         * 3. 再准备 video；
+         * 4. 再申请媒体流；
+         * 5. 最后才启动 detect 调度。
          *
          * 如果跳过其中任一步，最容易出现“video 已创建但没有真实画面”或
          * “detector 启动了但读不到视频流”的问题。
          */
         ensureBrowserSupport()
+        const detectorWarmupPromise = prewarmHandLandmarker()
         videoElement = ensureHiddenVideo()
         mediaStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
@@ -91,8 +93,11 @@ export function createH5HandTrackerSession() {
 
         videoElement.srcObject = mediaStream
         syncPreviewVideoVisibility(videoElement, true)
-        await waitForVideoReady(videoElement)
-        await videoElement.play()
+        await Promise.all([
+          detectorWarmupPromise,
+          waitForVideoReady(videoElement),
+          videoElement.play()
+        ])
 
         scheduleNextTick()
 
@@ -124,10 +129,10 @@ export function createH5HandTrackerSession() {
             const viewport = viewportProvider()
             const detector = await ensureHandLandmarker()
             const result = detector.detectForVideo(videoElement, performance.now())
-            const runtime = buildRuntimeInfo(mediaStream, getActiveDelegate())
+            const runtime = buildRuntimeInfo(mediaStream, getActiveDelegate(), videoElement)
             runtime.message = 'H5 MediaPipe 手部追踪运行中。'
             onFrame({
-              hands: mapMediaPipeResultToDetectedHands(result, viewport),
+              hands: mapMediaPipeResultToDetectedHands(result, viewport, videoElement),
               runtime
             })
           } catch (error) {
@@ -140,10 +145,10 @@ export function createH5HandTrackerSession() {
                 const detector = await ensureHandLandmarker()
                 const viewport = viewportProvider()
                 const result = detector.detectForVideo(videoElement, performance.now())
-                const runtime = buildRuntimeInfo(mediaStream, getActiveDelegate())
+                const runtime = buildRuntimeInfo(mediaStream, getActiveDelegate(), videoElement)
                 runtime.message = 'H5 MediaPipe 已自动从 GPU 回退到 CPU。'
                 onFrame({
-                  hands: mapMediaPipeResultToDetectedHands(result, viewport),
+                  hands: mapMediaPipeResultToDetectedHands(result, viewport, videoElement),
                   runtime
                 })
               } catch (fallbackError) {
@@ -201,10 +206,14 @@ export function createH5HandTrackerSession() {
             runDetect()
           }, FALLBACK_FRAME_INTERVAL_MS)
         }
-      } catch (error) {
-        onError(normalizeErrorMessage(error))
-        stopInternal()
-      }
+        } catch (error) {
+          if (stopped && isDetectorWarmupCancelled(error)) {
+            return
+          }
+
+          onError(normalizeErrorMessage(error))
+          stopInternal()
+        }
     },
     stop() {
       stopInternal()
@@ -341,19 +350,21 @@ function waitForVideoReady(videoElement) {
  * 而不是 getUserMedia 请求时的 ideal 参数，
  * 这样页面展示出来的信息才和实际运行情况一致。
  */
-function buildRuntimeInfo(stream, delegate) {
+function buildRuntimeInfo(stream, delegate, videoElement) {
   const videoTrack = stream && typeof stream.getVideoTracks === 'function' ? stream.getVideoTracks()[0] : null
   const videoTrackSettings = videoTrack && typeof videoTrack.getSettings === 'function' ? videoTrack.getSettings() : {}
   const width = Number(videoTrackSettings.width) || 0
   const height = Number(videoTrackSettings.height) || 0
   const frameRate = Number(videoTrackSettings.frameRate) || 0
   const backendName = delegate || 'CPU'
+  const videoWidth = Number(videoElement && videoElement.videoWidth) || width
+  const videoHeight = Number(videoElement && videoElement.videoHeight) || height
 
   return {
     backendName,
     backendLabel: '后端: ' + backendName,
     fpsLabel: frameRate > 0 ? ('帧率: ' + formatRate(frameRate)) : '帧率: --',
-    resolutionLabel: width > 0 && height > 0 ? ('分辨率: ' + width + 'x' + height) : '分辨率: H5 video',
+    resolutionLabel: videoWidth > 0 && videoHeight > 0 ? ('分辨率: ' + videoWidth + 'x' + videoHeight) : '分辨率: H5 video',
     message: ''
   }
 }
@@ -373,22 +384,27 @@ function normalizeErrorMessage(error) {
   return 'H5 手部检测启动失败'
 }
 
+function isDetectorWarmupCancelled(error) {
+  return Boolean(error && typeof error.message === 'string' && error.message === '__HAND_LANDMARKER_WARMUP_CANCELLED__')
+}
+
 /**
  * 将 MediaPipe HandLandmarker 的原始输出映射成页面可消费的手部数据。
  *
- * 这里使用“包围盒中心点 + 包围盒最大边长”作为输入，理由很简单：
+ * 这里先把 landmarks 折算成质心，再按视频实际显示方式映射到页面坐标。
  * 页面只需要知道“手在哪里”和“手相对大不大”，不需要完整 landmarks。
  */
-function mapMediaPipeResultToDetectedHands(result, viewport) {
+function mapMediaPipeResultToDetectedHands(result, viewport, videoElement) {
   const landmarksList = Array.isArray(result && result.landmarks) ? result.landmarks : []
   const handednessList = Array.isArray(result && result.handedness) ? result.handedness : []
+  const presentation = buildPresentationMetrics(viewport, videoElement)
 
   return landmarksList
-    .map((landmarks, index) => normalizeHand(landmarks, handednessList[index], viewport))
+    .map((landmarks, index) => normalizeHand(landmarks, handednessList[index], presentation))
     .filter(Boolean)
 }
 
-function normalizeHand(landmarks, handednessGroup, viewport) {
+function normalizeHand(landmarks, handednessGroup, presentation) {
   if (!Array.isArray(landmarks) || !landmarks.length || !Array.isArray(handednessGroup) || !handednessGroup.length) {
     return null
   }
@@ -413,21 +429,91 @@ function normalizeHand(landmarks, handednessGroup, viewport) {
 
   const boxWidth = Math.max(maxX - minX, 0)
   const boxHeight = Math.max(maxY - minY, 0)
+  const centroid = calculateLandmarkCentroid(landmarks)
+  const mappedCenter = mapNormalizedPointToViewport(centroid.x, centroid.y, presentation)
 
   return {
     label,
     confidence: Number(handedness.score || 0),
-    /**
-     * H5 前摄默认是镜像预览，
-     * 所以这里对 x 做一次镜像翻转，确保页面上的手部标记和用户视觉方向一致。
-     */
-    centerX: clamp(viewport.width - (((minX + maxX) * 0.5) * viewport.width), 0, viewport.width),
-    centerY: clamp(((minY + maxY) * 0.5) * viewport.height, 0, viewport.height),
+    centerX: mappedCenter.x,
+    centerY: mappedCenter.y,
     /**
      * size 不代表真实物理尺寸，而是“手在画面中的相对大小代理值”。
      * 页面层会继续用这个值去做 marker 的远近缩放和平滑过渡。
      */
     size: Math.max(boxWidth, boxHeight)
+  }
+}
+
+function calculateLandmarkCentroid(landmarks) {
+  let sumX = 0
+  let sumY = 0
+  let count = 0
+
+  landmarks.forEach((point) => {
+    const x = Number(point && point.x)
+    const y = Number(point && point.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return
+    }
+
+    sumX += x
+    sumY += y
+    count += 1
+  })
+
+  if (count <= 0) {
+    return { x: 0.5, y: 0.5 }
+  }
+
+  return {
+    x: sumX / count,
+    y: sumY / count
+  }
+}
+
+function buildPresentationMetrics(viewport, videoElement) {
+  const viewportWidth = Number(viewport && viewport.width) || 0
+  const viewportHeight = Number(viewport && viewport.height) || 0
+  const sourceWidth = Number(videoElement && videoElement.videoWidth) || viewportWidth
+  const sourceHeight = Number(videoElement && videoElement.videoHeight) || viewportHeight
+
+  if (viewportWidth <= 0 || viewportHeight <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+    return {
+      viewportWidth,
+      viewportHeight,
+      sourceWidth: Math.max(sourceWidth, 1),
+      sourceHeight: Math.max(sourceHeight, 1),
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0
+    }
+  }
+
+  const scale = Math.max(viewportWidth / sourceWidth, viewportHeight / sourceHeight)
+  const renderedWidth = sourceWidth * scale
+  const renderedHeight = sourceHeight * scale
+
+  return {
+    viewportWidth,
+    viewportHeight,
+    sourceWidth,
+    sourceHeight,
+    scale,
+    offsetX: (viewportWidth - renderedWidth) / 2,
+    offsetY: (viewportHeight - renderedHeight) / 2
+  }
+}
+
+function mapNormalizedPointToViewport(normalizedX, normalizedY, presentation) {
+  const sourceX = clamp(Number(normalizedX) || 0, 0, 1) * presentation.sourceWidth
+  const sourceY = clamp(Number(normalizedY) || 0, 0, 1) * presentation.sourceHeight
+  const screenX = presentation.offsetX + (sourceX * presentation.scale)
+  const screenY = presentation.offsetY + (sourceY * presentation.scale)
+
+  return {
+    x: clamp(presentation.viewportWidth - screenX, 0, presentation.viewportWidth),
+    y: clamp(screenY, 0, presentation.viewportHeight)
   }
 }
 

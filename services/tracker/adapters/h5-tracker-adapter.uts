@@ -1,6 +1,44 @@
 import { TrackingFrameNormalizer } from '../../../shared/tracking/normalizer.uts'
-import { DetectedHand, TrackingRuntimeInfo, TrackingViewport } from '../../../shared/tracking/models.uts'
+import { DetectedHand, TrackingFrame, TrackingRuntimeInfo, TrackingViewport } from '../../../shared/tracking/models.uts'
+import { TrackerAdapter } from './tracker-adapter.uts'
 import { createH5HandTrackerSession } from '../web/h5-hand-detector-adapter.js'
+
+/**
+ * H5 detector 与适配层之间的数据结构。
+ *
+ * 这里不再使用 any，让 JS 会话回传的手部结果和运行时信息都保持显式字段。
+ */
+export type H5RawHand = {
+  label: string
+  confidence: number
+  centerX: number
+  centerY: number
+  size: number
+}
+
+export type H5RawRuntimeInfo = {
+  backendName: string
+  backendLabel: string
+  fpsLabel: string
+  resolutionLabel: string
+  message: string
+}
+
+export type H5TrackerPayload = {
+  hands: Array<H5RawHand>
+  runtime: H5RawRuntimeInfo
+}
+
+export type H5TrackerSessionOptions = {
+  viewportProvider: (() => TrackingViewport)
+  onFrame: (payload : H5TrackerPayload) => void
+  onError: (message : string) => void
+}
+
+export interface H5TrackerSession {
+  start(options : H5TrackerSessionOptions) : void
+  stop() : void
+}
 
 /**
  * H5 追踪适配层。
@@ -12,13 +50,13 @@ import { createH5HandTrackerSession } from '../web/h5-hand-detector-adapter.js'
  * 维护者可以把这里理解为“平台结果翻译层”：
  * 页面不需要直接理解浏览器 detector 返回的数据形状，只需要接收这里整理后的结果。
  */
-export class H5TrackerAdapter {
+export class H5TrackerAdapter implements TrackerAdapter {
   private frameNormalizer : TrackingFrameNormalizer = new TrackingFrameNormalizer()
-  private frameCallback : ((frame : any, runtime : TrackingRuntimeInfo) => void) | null = null
+  private frameCallback : ((frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) | null = null
   private errorCallback : ((message : string) => void) | null = null
-  private session : any = null
+  private session : H5TrackerSession | null = null
 
-  onFrame(callback : (frame : any, runtime : TrackingRuntimeInfo) => void) : void {
+  onFrame(callback : (frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) : void {
     this.frameCallback = callback
   }
 
@@ -43,19 +81,12 @@ export class H5TrackerAdapter {
     this.stop()
     this.frameNormalizer.reset()
 
-    this.session = createH5HandTrackerSession()
+    this.session = createH5HandTrackerSession() as H5TrackerSession
     this.session.start({
-      viewportProvider: () => {
-        const width = typeof window !== 'undefined' ? Number(window.innerWidth) : viewport.width
-        const height = typeof window !== 'undefined' ? Number(window.innerHeight) : viewport.height
-        return {
-          width,
-          height
-        }
-      },
-      onFrame: (payload : any) => {
-        const rawHands = this.mapDetectedHands(payload != null ? payload.hands : [])
-        const runtime = this.mapRuntimeInfo(payload != null ? payload.runtime : null, viewport)
+      viewportProvider: this.createViewportProvider(viewport),
+      onFrame: (payload : H5TrackerPayload) => {
+        const rawHands = this.mapDetectedHands(payload.hands)
+        const runtime = this.mapRuntimeInfo(payload.runtime, viewport)
         const nextFrame = this.frameNormalizer.normalizeHands(rawHands, viewport)
         this.emitFrame(nextFrame, runtime)
       },
@@ -74,6 +105,17 @@ export class H5TrackerAdapter {
   }
 
   /**
+   * 生成 H5 视口提供器。
+   *
+   * 这里返回统一的 TrackingViewport，避免在 UTS 里再去推导匿名对象字面量。
+   */
+  private createViewportProvider(viewport : TrackingViewport) : (() => TrackingViewport) {
+    return () : TrackingViewport => {
+      return new TrackingViewport(viewport.width, viewport.height)
+    }
+  }
+
+  /**
    * 把 JS 会话层返回的松散 hands 数组重建为 DetectedHand。
    *
    * 输入：
@@ -86,20 +128,16 @@ export class H5TrackerAdapter {
    * - 共享层不应该依赖浏览器对象的松散字段；
    * - 这里集中处理字段缺失和类型转换，后续 detector 结构有变化时更容易维护。
    */
-  private mapDetectedHands(sourceHands : Array<any>) : Array<DetectedHand> {
+  private mapDetectedHands(sourceHands : Array<H5RawHand>) : Array<DetectedHand> {
     const list = [] as Array<DetectedHand>
     for (let i = 0; i < sourceHands.length; i++) {
       const source = sourceHands[i]
-      if (source == null) {
-        continue
-      }
-
       const hand = new DetectedHand()
-      hand.label = source.label != null ? String(source.label) : ''
-      hand.confidence = source.confidence != null ? Number(source.confidence) : 0
-      hand.centerX = source.centerX != null ? Number(source.centerX) : 0
-      hand.centerY = source.centerY != null ? Number(source.centerY) : 0
-      hand.size = source.size != null ? Number(source.size) : 0
+      hand.label = source.label
+      hand.confidence = source.confidence
+      hand.centerX = source.centerX
+      hand.centerY = source.centerY
+      hand.size = source.size
       list.push(hand)
     }
 
@@ -116,26 +154,26 @@ export class H5TrackerAdapter {
    *
    * 这样页面始终可以拿到完整字符串，避免模板层出现额外分支。
    */
-  private mapRuntimeInfo(runtimeSource : any, viewport : TrackingViewport) : TrackingRuntimeInfo {
+  private mapRuntimeInfo(runtimeSource : H5RawRuntimeInfo, viewport : TrackingViewport) : TrackingRuntimeInfo {
     const runtime = new TrackingRuntimeInfo()
-    const backendName = runtimeSource != null && runtimeSource.backendName != null ? String(runtimeSource.backendName) : 'CPU'
-    runtime.backendLabel = runtimeSource != null && runtimeSource.backendLabel != null
-      ? String(runtimeSource.backendLabel)
+    const backendName = runtimeSource.backendName.length > 0 ? runtimeSource.backendName : 'CPU'
+    runtime.backendLabel = runtimeSource.backendLabel.length > 0
+      ? runtimeSource.backendLabel
       : ('后端: ' + backendName)
-    runtime.fpsLabel = runtimeSource != null && runtimeSource.fpsLabel != null
-      ? String(runtimeSource.fpsLabel)
+    runtime.fpsLabel = runtimeSource.fpsLabel.length > 0
+      ? runtimeSource.fpsLabel
       : '帧率: --'
-    runtime.resolutionLabel = runtimeSource != null && runtimeSource.resolutionLabel != null
-      ? String(runtimeSource.resolutionLabel)
+    runtime.resolutionLabel = runtimeSource.resolutionLabel.length > 0
+      ? runtimeSource.resolutionLabel
       : ('分辨率: ' + viewport.width + 'x' + viewport.height)
-    runtime.message = runtimeSource != null && runtimeSource.message != null ? String(runtimeSource.message) : 'H5 检测链路运行中。'
+    runtime.message = runtimeSource.message.length > 0 ? runtimeSource.message : 'H5 检测链路运行中。'
     return runtime
   }
 
   /**
    * 统一触发 frame 回调，避免在多个分支里直接操作可空字段。
    */
-  private emitFrame(frame : any, runtime : TrackingRuntimeInfo) : void {
+  private emitFrame(frame : TrackingFrame, runtime : TrackingRuntimeInfo) : void {
     const callback = this.frameCallback
     if (callback == null) {
       return

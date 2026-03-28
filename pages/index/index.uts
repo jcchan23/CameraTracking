@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { ORIENTATION_MASK_TEXT } from '../../shared/tracking/constants.uts'
+import type { Ref } from 'vue'
 import { clamp } from '../../shared/tracking/math.uts'
 import { HandPoint, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
 import { TrackerService } from '../../services/tracker/tracker-service.uts'
@@ -16,8 +16,6 @@ import { TrackerService } from '../../services/tracker/tracker-service.uts'
  */
 const trackingService = new TrackerService()
 
-const orientationMaskText = ref(ORIENTATION_MASK_TEXT)
-const shouldBlockForOrientation = ref(false)
 const trackingState = ref('idle')
 const statusText = ref('等待启动')
 const backendText = ref('后端: --')
@@ -131,7 +129,7 @@ function resolveRuntimeChipClass(backendLabel : string) : string {
     return 'runtime-chip-gpu'
   }
 
-  if (backendLabel.indexOf('CPU') >= 0 || backendLabel.indexOf('Android 原生') >= 0) {
+  if (backendLabel.indexOf('CPU') >= 0) {
     return 'runtime-chip-cpu'
   }
 
@@ -142,43 +140,36 @@ function resolveRuntimeChipClass(backendLabel : string) : string {
  * 读取当前页面可用视口尺寸。
  *
  * 这里统一从 uni.getSystemInfoSync() 取 windowWidth / windowHeight，
- * 是为了让横竖屏判断、marker 坐标计算和启动逻辑都基于同一套尺寸来源。
+ * 是为了让 marker 坐标计算和启动逻辑都基于同一套尺寸来源。
  */
 function readViewport() : TrackingViewport {
   // @ts-ignore uni-app x 运行时会注入 uni 全局对象
   const systemInfo = uni.getSystemInfoSync()
-  return new TrackingViewport(Number(systemInfo.windowWidth), Number(systemInfo.windowHeight))
-}
-
-/**
- * 横竖屏策略同步入口。
- *
- * 当前项目已经回到 uni-app x 的 H5 单端结构，
- * 所以这里直接按当前视口宽高判断是否需要进入横屏遮罩。
- */
-function syncOrientationState() : void {
-  const viewport = readViewport()
-  const nextLandscape = viewport.width >= viewport.height
-  shouldBlockForOrientation.value = !nextLandscape
-
-  if (!nextLandscape) {
-    stopTrackingFlow()
-  }
+  const viewport = new TrackingViewport()
+  viewport.width = systemInfo.windowWidth
+  viewport.height = systemInfo.windowHeight
+  return viewport
 }
 
 /**
  * 统一刷新页面视口相关状态，并在需要时触发启动。
  *
  * 这个函数是页面的“总刷新入口”：
- * - 页面 ready / show / resize 时都走这里；
- * - 先同步横竖屏状态，再决定是否允许启动追踪。
+ * - 页面 ready / show 时都走这里；
+ * - 直接启动追踪，不再做横竖屏阻塞判断。
  */
 function refreshTrackingViewport(allowStart : boolean = false) : void {
-  syncOrientationState()
-
-  if (allowStart && !shouldBlockForOrientation.value) {
-    startTrackingFlow()
+  if (allowStart) {
+    tryStartTrackingFlow()
   }
+}
+
+function tryStartTrackingFlow() : void {
+  if (!pageReady.value) {
+    return
+  }
+
+  startTrackingFlow()
 }
 
 /**
@@ -186,14 +177,13 @@ function refreshTrackingViewport(allowStart : boolean = false) : void {
  *
  * 关键保护条件：
  * - 页面还没 ready，不启动；
- * - 当前仍被横屏策略阻塞，不启动；
  * - 已经启动过，不重复启动。
  *
  * 这些判断不能随便删，否则最容易出现重复申请摄像头、重复创建 detector
  * 或页面状态和底层追踪状态不一致的问题。
  */
 function startTrackingFlow() : void {
-  if (!pageReady.value || shouldBlockForOrientation.value || trackingStarted.value) {
+  if (!pageReady.value || trackingStarted.value) {
     return
   }
 
@@ -207,7 +197,6 @@ function startTrackingFlow() : void {
  * 任何需要停止追踪的场景都应该走这里：
  * - 切后台
  * - 卸载页面
- * - 原生端切回非横屏
  *
  * 这样可以保证页面状态、预览状态和底层服务的停止动作始终一致。
  */
@@ -244,11 +233,29 @@ function handlePageUnload() : void {
   stopTrackingFlow()
 }
 
-function handlePageResize() : void {
-  refreshTrackingViewport(true)
+export type TrackingPageBindings = {
+  trackingState : Ref<string>
+  statusText : Ref<string>
+  backendText : Ref<string>
+  fpsText : Ref<string>
+  resolutionText : Ref<string>
+  runtimeMessage : Ref<string>
+  runtimeChipClass : Ref<string>
+  leftMarkerVisible : Ref<boolean>
+  rightMarkerVisible : Ref<boolean>
+  leftGlowVisible : Ref<boolean>
+  rightGlowVisible : Ref<boolean>
+  leftMarkerStyle : Ref<string>
+  rightMarkerStyle : Ref<string>
+  leftGlowStyle : Ref<string>
+  rightGlowStyle : Ref<string>
+  handlePageReady : () => void
+  handlePageShow : () => void
+  handlePageHide : () => void
+  handlePageUnload : () => void
 }
 
-export function useTrackingPage() {
+export function useTrackingPage() : TrackingPageBindings {
   /**
    * 页面唯一对外暴露的逻辑入口。
    *
@@ -256,27 +263,32 @@ export function useTrackingPage() {
    * 这样做能把“页面长什么样”和“页面怎么跑”分开，便于维护者定位问题。
    */
   return {
-    orientationMaskText,
-    shouldBlockForOrientation,
-    trackingState,
-    statusText,
-    backendText,
-    fpsText,
-    resolutionText,
-    runtimeMessage,
-    runtimeChipClass,
-    leftMarkerVisible,
-    rightMarkerVisible,
-    leftGlowVisible,
-    rightGlowVisible,
-    leftMarkerStyle,
-    rightMarkerStyle,
-    leftGlowStyle,
-    rightGlowStyle,
-    handlePageReady,
-    handlePageShow,
-    handlePageHide,
-    handlePageUnload,
-    handlePageResize
+    trackingState: trackingState,
+    statusText: statusText,
+    backendText: backendText,
+    fpsText: fpsText,
+    resolutionText: resolutionText,
+    runtimeMessage: runtimeMessage,
+    runtimeChipClass: runtimeChipClass,
+    leftMarkerVisible: leftMarkerVisible,
+    rightMarkerVisible: rightMarkerVisible,
+    leftGlowVisible: leftGlowVisible,
+    rightGlowVisible: rightGlowVisible,
+    leftMarkerStyle: leftMarkerStyle,
+    rightMarkerStyle: rightMarkerStyle,
+    leftGlowStyle: leftGlowStyle,
+    rightGlowStyle: rightGlowStyle,
+    handlePageReady: () : void => {
+      handlePageReady()
+    },
+    handlePageShow: () : void => {
+      handlePageShow()
+    },
+    handlePageHide: () : void => {
+      handlePageHide()
+    },
+    handlePageUnload: () : void => {
+      handlePageUnload()
+    }
   }
 }

@@ -49,8 +49,8 @@ export class TrackingViewport {
 /**
  * 原始检测结果中的单手信息。
  *
- * Android 与 H5 适配器都先归一化成这个结构，再交给共享算法处理。
- * 这样 handedness 稳定、坐标钳制和页面 marker 计算都能跨端复用。
+ * H5 适配层先归一化成这个结构，再交给共享算法处理。
+ * 这样 handedness 稳定、坐标钳制和页面 marker 计算都能在同一条链路里复用。
  */
 export class DetectedHand {
   label : string = ''

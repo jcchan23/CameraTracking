@@ -16,8 +16,10 @@ const DETECTOR_OPTIONS = {
 
 let detectorInstance = null
 let detectorPromise = null
+let detectorGeneration = 0
 let activeDelegate = 'CPU'
 let gpuCanvas = null
+const DETECTOR_WARMUP_CANCELLED_ERROR = '__HAND_LANDMARKER_WARMUP_CANCELLED__'
 
 /**
  * 当前实际使用的 delegate 会回传给页面调试面板，
@@ -25,6 +27,16 @@ let gpuCanvas = null
  */
 export function getActiveDelegate() {
   return activeDelegate
+}
+
+/**
+ * 预热 detector。
+ *
+ * 这个函数保留单一职责：尽早触发 detector 创建，但不改变缓存和回退策略。
+ * 会话层可以在摄像头申请阶段就调用它，把 GPU / CPU 初始化和媒体流申请并行起来。
+ */
+export function prewarmHandLandmarker() {
+  return ensureHandLandmarker()
 }
 
 /**
@@ -37,8 +49,14 @@ export async function ensureHandLandmarker() {
   }
 
   if (!detectorPromise) {
+    const requestGeneration = detectorGeneration
     detectorPromise = createPreferredDetector()
       .then((detector) => {
+        if (requestGeneration !== detectorGeneration) {
+          closeDetectorSafely(detector)
+          throw new Error(DETECTOR_WARMUP_CANCELLED_ERROR)
+        }
+
         detectorInstance = detector
         return detector
       })
@@ -57,6 +75,8 @@ export async function ensureHandLandmarker() {
  * 避免后续调试信息沿用上一次已经失效的后端值。
  */
 export function destroyHandLandmarker() {
+  detectorGeneration += 1
+
   if (detectorInstance && typeof detectorInstance.close === 'function') {
     detectorInstance.close()
   }
@@ -169,4 +189,10 @@ function cleanupGpuCanvas() {
   }
 
   gpuCanvas = null
+}
+
+function closeDetectorSafely(detector) {
+  if (detector && typeof detector.close === 'function') {
+    detector.close()
+  }
 }

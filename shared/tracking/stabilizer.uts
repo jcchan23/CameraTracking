@@ -7,8 +7,8 @@ import { DetectedHand, StabilizedHands } from './models.uts'
  * 因此这里沿用 v1 的思路，结合历史位置连续性做稳定分配。
  *
  * 这部分逻辑放在 shared 层而不是 detector 层，原因是：
- * - H5 和 Android 都会遇到左右手标签抖动问题；
- * - 这属于“页面消费检测结果之前的统一业务规则”，而不是某个模型 SDK 的特性。
+ * - 左右手标签抖动属于页面消费检测结果之前的统一业务规则；
+ * - 这不应该绑死在某个模型 SDK 的实现细节里。
  */
 export class HandAssignmentStabilizer {
   private lastLeft : DetectedHand | null = null

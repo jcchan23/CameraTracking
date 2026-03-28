@@ -2,10 +2,9 @@ import { defineConfig } from 'vite'
 import uni from '@dcloudio/vite-plugin-uni'
 
 /**
- * 当前工程收敛为 uni-app x 的 H5 结构后，Vite 只保留 uni 插件。
+ * uni-app x 项目采用最小插件链。
  *
- * 这样可以避免重新引入 Vue 单独解析器、Android 分支补丁以及旧 uni-app
- * 的额外启动假设，让构建链路回到最小可维护状态。
+ * 标准结构下只保留 uni 插件，让 .uvue/.uts 交给 uni-app x 编译器处理。
  */
 export default defineConfig({
   plugins: [uni()]

@@ -1,6 +1,9 @@
 import { TrackingPresenter } from '../../shared/tracking/presenter.uts'
-import { TrackingRuntimeInfo, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
+import { TrackingFrame, TrackingRuntimeInfo, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
+// #ifdef WEB
 import { H5TrackerAdapter } from './adapters/h5-tracker-adapter.uts'
+// #endif
+import { TrackerAdapter } from './adapters/tracker-adapter.uts'
 
 /**
  * 追踪服务层。
@@ -15,7 +18,7 @@ import { H5TrackerAdapter } from './adapters/h5-tracker-adapter.uts'
 export class TrackerService {
   private presenter : TrackingPresenter = new TrackingPresenter()
   private snapshotListener : ((snapshot : TrackingSnapshot) => void) | null = null
-  private activeAdapter : any = null
+  private activeAdapter : TrackerAdapter | null = null
   private started : boolean = false
 
   onSnapshot(callback : (snapshot : TrackingSnapshot) => void) : void {
@@ -47,7 +50,7 @@ export class TrackerService {
     this.presenter.markStarting()
     this.publishSnapshot()
     this.activeAdapter = this.createAdapter()
-    this.activeAdapter.onFrame((frame : any, runtime : TrackingRuntimeInfo) => {
+    this.activeAdapter.onFrame((frame : TrackingFrame, runtime : TrackingRuntimeInfo) => {
       this.presenter.applyFrame(frame, runtime)
       this.publishSnapshot()
     })
@@ -95,9 +98,19 @@ export class TrackerService {
   /**
    * 按当前平台选择适配器。
    *
-   * 当前工程只保留 H5 追踪链路，因此这里直接返回 H5 适配器。
+   * 当前工程只保留 H5 追踪链路，因此这里只返回 H5 适配器。
    */
-  private createAdapter() : any {
-    return new H5TrackerAdapter()
+  private createAdapter() : TrackerAdapter {
+    let adapter : TrackerAdapter | null = null
+
+    // #ifdef WEB
+    adapter = new H5TrackerAdapter()
+    // #endif
+
+    if (adapter == null) {
+      throw new Error('当前平台没有可用的追踪适配器')
+    }
+
+    return adapter
   }
 }

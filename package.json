@@ -5,14 +5,15 @@
   "description": "基于 uni-app x 的 H5 双手追踪项目",
   "scripts": {
     "postinstall": "node scripts/sync-mediapipe-assets.js",
-    "sync:mediapipe": "node scripts/sync-mediapipe-assets.js",
-    "dev:h5": "node -e \"const path=require('node:path'); const {spawn}=require('node:child_process'); const root=process.cwd(); const cli=path.join(root,'node_modules','@dcloudio','vite-plugin-uni','bin','uni.js'); const child=spawn(process.execPath,[cli],{cwd:root,env:{...process.env,UNI_INPUT_DIR:root,VITE_ROOT_DIR:root},stdio:'inherit',shell:false}); child.on('error',err=>{console.error(err&&err.message?err.message:err); process.exit(1);}); child.on('exit',code=>process.exit(code||0));\"",
-    "build:h5": "node -e \"const path=require('node:path'); const {spawn}=require('node:child_process'); const root=process.cwd(); const cli=path.join(root,'node_modules','@dcloudio','vite-plugin-uni','bin','uni.js'); const child=spawn(process.execPath,[cli,'build'],{cwd:root,env:{...process.env,UNI_INPUT_DIR:root,VITE_ROOT_DIR:root},stdio:'inherit',shell:false}); child.on('error',err=>{console.error(err&&err.message?err.message:err); process.exit(1);}); child.on('exit',code=>process.exit(code||0));\""
+    "sync:mediapipe": "node scripts/sync-mediapipe-assets.js"
   },
   "dependencies": {
+    "@dcloudio/types": "3.4.30",
+    "@dcloudio/uni-app": "3.0.0-4070620250821001",
     "@dcloudio/uni-app-x": "0.7.118",
+    "@dcloudio/uni-components": "3.0.0-4070620250821001",
     "@mediapipe/tasks-vision": "0.10.33",
-    "vue": "^3.4.21"
+    "vue": "3.4.21"
   },
   "devDependencies": {
     "@dcloudio/uni-uts-v1": "3.0.0-4070620250821001",

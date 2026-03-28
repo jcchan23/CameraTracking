@@ -1,37 +1,27 @@
 <template>
 	<view class="page">
-		<view v-if="shouldBlockForOrientation" class="orientation-mask">
-			<!-- 横屏提示页的装饰层：使用普通 view 模拟光斑，避免依赖 radial-gradient 等 Web 专属背景写法。 -->
-			<view class="orientation-mask-decoration orientation-mask-decoration-left"></view>
-			<view class="orientation-mask-decoration orientation-mask-decoration-right"></view>
-			<text class="mask-title">请横屏后继续</text>
-			<text class="mask-body">{{ orientationMaskText }}</text>
+		<view class="web-preview-mask"></view>
+
+		<view class="marker-layer">
+			<view v-if="leftGlowVisible" class="marker marker-glow marker-left-glow" :style="leftGlowStyle"></view>
+			<view v-if="rightGlowVisible" class="marker marker-glow marker-right-glow" :style="rightGlowStyle"></view>
+			<view v-if="leftMarkerVisible" class="marker marker-solid marker-left-solid" :style="leftMarkerStyle"></view>
+			<view v-if="rightMarkerVisible" class="marker marker-solid marker-right-solid" :style="rightMarkerStyle"></view>
 		</view>
 
-		<view v-else class="tracking-stage">
-			<view class="web-preview-mask"></view>
-
-			<view class="marker-layer">
-				<view v-if="leftGlowVisible" class="marker marker-glow marker-left-glow" :style="leftGlowStyle"></view>
-				<view v-if="rightGlowVisible" class="marker marker-glow marker-right-glow" :style="rightGlowStyle"></view>
-				<view v-if="leftMarkerVisible" class="marker marker-solid marker-left-solid" :style="leftMarkerStyle"></view>
-				<view v-if="rightMarkerVisible" class="marker marker-solid marker-right-solid" :style="rightMarkerStyle"></view>
+		<view class="status-panel">
+			<view class="status-chip" :class="'state-' + trackingState">
+				<text class="status-chip-text">{{ statusText }}</text>
 			</view>
 
-			<view class="status-panel">
-				<view class="status-chip" :class="'state-' + trackingState">
-					<text class="status-chip-text">{{ statusText }}</text>
-				</view>
+			<view class="runtime-chip" :class="runtimeChipClass">
+				<text class="runtime-chip-text">{{ backendText }}</text>
+			</view>
 
-				<view class="runtime-chip" :class="runtimeChipClass">
-					<text class="runtime-chip-text">{{ backendText }}</text>
-				</view>
-
-				<view class="debug-chip">
-					<text class="debug-chip-line">{{ fpsText }}</text>
-					<text class="debug-chip-line">{{ resolutionText }}</text>
-					<text class="debug-chip-line">{{ runtimeMessage }}</text>
-				</view>
+			<view class="debug-chip">
+				<text class="debug-chip-line">{{ fpsText }}</text>
+				<text class="debug-chip-line">{{ resolutionText }}</text>
+				<text class="debug-chip-line">{{ runtimeMessage }}</text>
 			</view>
 		</view>
 	</view>
@@ -39,31 +29,26 @@
 
 <script setup lang="uts">
 	import { useTrackingPage } from './index.uts'
-
-	const {
-		orientationMaskText,
-		shouldBlockForOrientation,
-		trackingState,
-		statusText,
-		backendText,
-		fpsText,
-		resolutionText,
-		runtimeMessage,
-		runtimeChipClass,
-		leftMarkerVisible,
-		rightMarkerVisible,
-		leftGlowVisible,
-		rightGlowVisible,
-		leftMarkerStyle,
-		rightMarkerStyle,
-		leftGlowStyle,
-		rightGlowStyle,
-		handlePageReady,
-		handlePageShow,
-		handlePageHide,
-		handlePageUnload,
-		handlePageResize
-	} = useTrackingPage()
+	const trackingPage = useTrackingPage()
+	const trackingState = trackingPage.trackingState
+	const statusText = trackingPage.statusText
+	const backendText = trackingPage.backendText
+	const fpsText = trackingPage.fpsText
+	const resolutionText = trackingPage.resolutionText
+	const runtimeMessage = trackingPage.runtimeMessage
+	const runtimeChipClass = trackingPage.runtimeChipClass
+	const leftMarkerVisible = trackingPage.leftMarkerVisible
+	const rightMarkerVisible = trackingPage.rightMarkerVisible
+	const leftGlowVisible = trackingPage.leftGlowVisible
+	const rightGlowVisible = trackingPage.rightGlowVisible
+	const leftMarkerStyle = trackingPage.leftMarkerStyle
+	const rightMarkerStyle = trackingPage.rightMarkerStyle
+	const leftGlowStyle = trackingPage.leftGlowStyle
+	const rightGlowStyle = trackingPage.rightGlowStyle
+	const handlePageReady = trackingPage.handlePageReady
+	const handlePageShow = trackingPage.handlePageShow
+	const handlePageHide = trackingPage.handlePageHide
+	const handlePageUnload = trackingPage.handlePageUnload
 
 	// @ts-ignore uni-app x 页面生命周期由运行时注入
 	onReady(() => {
@@ -84,30 +69,21 @@
 	onUnload(() => {
 		handlePageUnload()
 	})
-
-	// @ts-ignore uni-app x 页面生命周期由运行时注入
-	onResize(() => {
-		handlePageResize()
-	})
 </script>
 
 <style>
 	/* 页面根层：负责承接整个页面的基础布局。 */
 	.page {
-		flex: 1;
-		background-color: transparent;
-	}
-
-	/* 主舞台层：摄像头画面、marker 与状态面板都叠加在这一层。 */
-	.tracking-stage {
-		flex: 1;
 		position: relative;
+		width: 100%;
+		height: 100%;
 		background-color: transparent;
+		overflow: hidden;
 	}
 
 	/* H5 预览遮罩：只负责压一层轻微暗角，保证状态面板和 marker 更容易看清。 */
 	.web-preview-mask {
-		position: absolute;
+		position: fixed;
 		left: 0;
 		top: 0;
 		right: 0;
@@ -117,62 +93,9 @@
 		pointer-events: none;
 	}
 
-	/* 横屏提示层：仅在原生端需要横屏时阻塞页面，H5 当前不会进入这个分支。 */
-	.orientation-mask {
-		position: relative;
-		flex: 1;
-		padding: 48rpx;
-		justify-content: center;
-		align-items: center;
-		background-image: linear-gradient(160deg, #08111f, #162033);
-		background-color: #08111f;
-		overflow: hidden;
-	}
-
-	/* 为兼容 uni-app x 的 CSS 子集，这里改用绝对定位装饰 view 模拟背景光斑。 */
-	.orientation-mask-decoration {
-		position: absolute;
-		border-radius: 999px;
-		opacity: 0.18;
-		pointer-events: none;
-	}
-
-	.orientation-mask-decoration-left {
-		left: -80rpx;
-		top: -40rpx;
-		width: 320rpx;
-		height: 320rpx;
-		background-color: rgba(59, 130, 246, 0.36);
-	}
-
-	.orientation-mask-decoration-right {
-		right: -60rpx;
-		top: -20rpx;
-		width: 260rpx;
-		height: 260rpx;
-		background-color: rgba(249, 115, 22, 0.28);
-	}
-
-	.mask-title {
-		z-index: 1;
-		margin-bottom: 16rpx;
-		font-size: 42rpx;
-		font-weight: 600;
-		color: #ffffff;
-	}
-
-	.mask-body {
-		z-index: 1;
-		width: 78%;
-		font-size: 28rpx;
-		line-height: 42rpx;
-		text-align: center;
-		color: rgba(255, 255, 255, 0.76);
-	}
-
 	/* 手部 marker 覆盖层：始终覆盖在摄像头画面上方，不参与页面布局流。 */
 	.marker-layer {
-		position: absolute;
+		position: fixed;
 		left: 0;
 		top: 0;
 		right: 0;
@@ -208,7 +131,7 @@
 
 	/* 左上状态面板：固定在页面左上，和摄像头画面脱离布局流，避免被内容挤动。 */
 	.status-panel {
-		position: absolute;
+		position: fixed;
 		left: 24rpx;
 		top: 24rpx;
 		z-index: 10;
