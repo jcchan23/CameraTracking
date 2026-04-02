@@ -1,5 +1,7 @@
 /**
  * 共用数学工具方法。
+ *
+ * 这类工具函数不依赖平台，也不依赖追踪领域本身，方便 shared 层到处复用。
  */
 export function clamp(value : number, minValue : number, maxValue : number) : number {
   if (value < minValue) {

@@ -2,7 +2,7 @@
   "name": "cameratracking-v2",
   "version": "1.0.0",
   "private": true,
-  "description": "基于 uni-app x 的 H5 双手追踪项目",
+  "description": "基于 uni-app x 的双手追踪项目",
   "scripts": {
     "postinstall": "node scripts/sync-mediapipe-assets.js",
     "sync:mediapipe": "node scripts/sync-mediapipe-assets.js"

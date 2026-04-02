@@ -15,13 +15,16 @@ import { HandAssignmentStabilizer } from './stabilizer.uts'
  * 这样平台层保持“尽量薄”，而真正影响页面表现的一致性逻辑都沉到 shared 层。
  */
 export class TrackingFrameNormalizer {
+  // 左右手稳定分配器单独持有，避免页面和平台层自己处理标签翻转。
   private stabilizer : HandAssignmentStabilizer = new HandAssignmentStabilizer()
 
   reset() : void {
+    // 每次新会话开始前都要重置，避免当前会话之外的左右手状态残留。
     this.stabilizer.reset()
   }
 
   normalizeHands(rawHands : Array<DetectedHand>, viewport : TrackingViewport) : TrackingFrame {
+    // 先稳定分配左右手，再把结果折叠成页面可直接消费的固定结构。
     const stabilizedHands = this.stabilizer.stabilize(rawHands)
     return this.buildFrame(stabilizedHands, viewport)
   }
@@ -32,6 +35,7 @@ export class TrackingFrameNormalizer {
    */
   private buildFrame(hands : StabilizedHands, viewport : TrackingViewport) : TrackingFrame {
     const frame = new TrackingFrame()
+    // 这里的 null 表示当前没有检测到对应的手。
     frame.leftHand = this.normalizeSingleHand(hands.left, viewport)
     frame.rightHand = this.normalizeSingleHand(hands.right, viewport)
     return frame

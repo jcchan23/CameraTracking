@@ -1,0 +1,109 @@
+import { ref } from 'vue'
+import type { Ref } from 'vue'
+import { clamp } from '../../shared/tracking/math.uts'
+import { HandPoint, TrackingSnapshot } from '../../shared/tracking/models.uts'
+
+/**
+ * 手部 marker 页面展示对象。
+ *
+ * 这一份对象只描述 marker 的可见性、位置和缩放，不承载页面状态和调试文本。
+ * 这样页面层在高频追踪场景里，只需要维护最小的一组可视字段。
+ */
+export class HandMarkerPresentation {
+  visible : boolean = false
+  glowVisible : boolean = false
+  markerStyle : string = ''
+  glowStyle : string = ''
+  x : number = -1
+  y : number = -1
+  scale : number = -1
+}
+
+/**
+ * marker 渲染域绑定对象。
+ *
+ * 页面层会把这里的两个对象交给 marker 组件使用，并在快照变化时只更新这两份状态。
+ */
+export type TrackingMarkerBindings = {
+  leftMarker : HandMarkerPresentation
+  rightMarker : HandMarkerPresentation
+  markerVersion : Ref<number>
+  applySnapshot : (snapshot : TrackingSnapshot) => void
+}
+
+/**
+ * 创建 marker 渲染域控制器。
+ *
+ * 这个控制器只负责把 TrackingSnapshot 里的左右手结果整理成模板可直接消费的展示对象。
+ */
+export function createTrackingMarkerBindings() : TrackingMarkerBindings {
+  const leftMarker = new HandMarkerPresentation()
+  const rightMarker = new HandMarkerPresentation()
+  const markerVersion = ref(0)
+
+  return {
+    leftMarker: leftMarker,
+    rightMarker: rightMarker,
+    markerVersion: markerVersion,
+    applySnapshot: (snapshot : TrackingSnapshot) : void => {
+      let changed = false
+      changed = syncMarkerPresentation(leftMarker, snapshot.frame.leftHand, snapshot.leftScale) || changed
+      changed = syncMarkerPresentation(rightMarker, snapshot.frame.rightHand, snapshot.rightScale) || changed
+
+      if (changed) {
+        markerVersion.value += 1
+      }
+    }
+  }
+}
+
+/**
+ * 根据快照同步左右手 marker 的展示状态。
+ *
+ * 输入：
+ * - 当前手部结果
+ * - 已经平滑过的 marker 缩放值
+ *
+ * 输出：
+ * - 左右手 marker 的显隐、位置和样式字符串
+ *
+ * 这里把“是否需要重绘”收敛到一个判断里，避免每次快照都重复写一串无意义的响应式字段。
+ */
+function syncMarkerPresentation(marker : HandMarkerPresentation, hand : HandPoint | null, scale : number) : boolean {
+  const visible = hand != null
+  const x = visible && hand != null ? hand.x : 0
+  const y = visible && hand != null ? hand.y : 0
+  const nextScale = visible ? scale : 0
+
+  if (marker.visible == visible && marker.x == x && marker.y == y && marker.scale == nextScale) {
+    return false
+  }
+
+  // 这里只在真正变化时重建样式，避免 marker 以外的状态波动引发额外开销。
+  marker.visible = visible
+  marker.glowVisible = visible
+  marker.markerStyle = buildMarkerStyle(hand, scale, false)
+  marker.glowStyle = buildMarkerStyle(hand, scale, true)
+  marker.x = x
+  marker.y = y
+  marker.scale = nextScale
+
+  return true
+}
+
+/**
+ * 生成单个 marker 的内联样式字符串。
+ *
+ * 这个函数只做最小几何计算，把位置和尺寸直接写成 `style` 字符串。
+ * marker 样式如果在模板里现场拼，会让高频渲染更难控，所以这里单独收口。
+ */
+function buildMarkerStyle(hand : HandPoint | null, scale : number, glow : boolean) : string {
+  if (hand == null) {
+    return ''
+  }
+
+  const size = glow ? (36 * scale) : (18 * scale)
+  const left = clamp(hand.x - (size / 2), 0, 99999)
+  const top = clamp(hand.y - (size / 2), 0, 99999)
+  return 'left:' + left + 'px;top:' + top + 'px;width:' + size + 'px;height:' + size + 'px;'
+}

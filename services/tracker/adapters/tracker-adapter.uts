@@ -3,12 +3,50 @@ import { TrackingFrame, TrackingRuntimeInfo, TrackingViewport } from '../../../s
 /**
  * 统一追踪适配器契约。
  *
- * 页面与服务层只依赖这个结构，不直接接触具体检测实现。
- * 这样服务层的类型就能保持显式，也方便后续统一演进协议。
+ * 页面与 service 只依赖这个结构，不直接接触具体检测实现。
+ * 这样平台差异被压在 adapter 内部，上层就只需要理解统一的追踪协议。
  */
 export interface TrackerAdapter {
+  /**
+   * 绑定原生预览宿主。
+   *
+   * H5 实现可以忽略这个入口，Android 之类原生平台会在这里接收 native-view。
+   */
+  attachPreviewHost(element : UniNativeViewElement) : void
+  /**
+   * 释放原生预览宿主。
+   *
+   * 页面上的宿主销毁时调用，适配器需要把相机、detector 等资源一起收口。
+   */
+  detachPreviewHost() : void
+  /**
+   * 注册帧回调。
+   *
+   * frame 是每一帧追踪结果，runtime 是页面右上角/左上角调试信息的来源。
+   */
   onFrame(callback : (frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) : void
+  /**
+   * 注册错误回调。
+   *
+   * 适配器如果在平台层失败，不要直接吞掉，统一通过这里上报给 service。
+   */
   onError(callback : (message : string) => void) : void
+  /**
+   * 注册调试回调。
+   *
+   * 这里的调试信息会直接汇总到页面底部日志区，方便在模拟器里排查原生链路。
+   */
+  onDebug(callback : (message : string) => void) : void
+  /**
+   * 启动追踪。
+   *
+   * viewport 是页面可视区域尺寸，后续坐标归一化和 marker 展示都要用它。
+   */
   start(viewport : TrackingViewport) : void
+  /**
+   * 停止追踪并释放平台资源。
+   *
+   * 这个入口要尽量做到幂等，多次调用也不应留下旧会话。
+   */
   stop() : void
 }

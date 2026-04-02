@@ -33,6 +33,7 @@ export type H5TrackerSessionOptions = {
   viewportProvider: (() => TrackingViewport)
   onFrame: (payload : H5TrackerPayload) => void
   onError: (message : string) => void
+  onDebug: (message : string) => void
 }
 
 export interface H5TrackerSession {
@@ -51,10 +52,24 @@ export interface H5TrackerSession {
  * 页面不需要直接理解浏览器 detector 返回的数据形状，只需要接收这里整理后的结果。
  */
 export class H5TrackerAdapter implements TrackerAdapter {
+  /**
+   * H5 侧也实现同一套接口，但原生宿主相关方法保持空实现。
+   *
+   * 这样 TrackerService 可以统一调用，不需要每次都写平台分支。
+   */
   private frameNormalizer : TrackingFrameNormalizer = new TrackingFrameNormalizer()
   private frameCallback : ((frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) | null = null
   private errorCallback : ((message : string) => void) | null = null
+  private debugCallback : ((message : string) => void) | null = null
   private session : H5TrackerSession | null = null
+
+  attachPreviewHost(_element : UniNativeViewElement) : void {
+    // H5 不使用原生预览宿主，保留空实现以便 service 层统一调用。
+  }
+
+  detachPreviewHost() : void {
+    // H5 不使用原生预览宿主，保留空实现以便 service 层统一调用。
+  }
 
   onFrame(callback : (frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) : void {
     this.frameCallback = callback
@@ -64,12 +79,16 @@ export class H5TrackerAdapter implements TrackerAdapter {
     this.errorCallback = callback
   }
 
+  onDebug(callback : (message : string) => void) : void {
+    this.debugCallback = callback
+  }
+
   /**
    * 启动 H5 检测适配器。
    *
    * 核心步骤：
    * 1. 先 stop，防止重复启动留下旧会话；
-   * 2. 重置 normalizer，避免上一轮左右手历史影响下一轮；
+   * 2. 重置 normalizer，保证当前会话从干净状态开始；
    * 3. 创建 H5 检测会话；
    * 4. 把 JS 层回调映射成共享层 frame 和 runtime 信息。
    *
@@ -78,6 +97,7 @@ export class H5TrackerAdapter implements TrackerAdapter {
    * - 页面状态统一交给 TrackerService 和 presenter 处理。
    */
   start(viewport : TrackingViewport) : void {
+    // 每次 start 前先 stop，避免旧会话、旧回调或旧 normalizer 状态残留。
     this.stop()
     this.frameNormalizer.reset()
 
@@ -85,6 +105,7 @@ export class H5TrackerAdapter implements TrackerAdapter {
     this.session.start({
       viewportProvider: this.createViewportProvider(viewport),
       onFrame: (payload : H5TrackerPayload) => {
+        // 浏览器会话回来的原始结果，要先转成共享层对象，再交给 presenter。
         const rawHands = this.mapDetectedHands(payload.hands)
         const runtime = this.mapRuntimeInfo(payload.runtime, viewport)
         const nextFrame = this.frameNormalizer.normalizeHands(rawHands, viewport)
@@ -92,6 +113,9 @@ export class H5TrackerAdapter implements TrackerAdapter {
       },
       onError: (message : string) => {
         this.emitError(message)
+      },
+      onDebug: (message : string) => {
+        this.emitDebug(message)
       }
     })
     return
@@ -110,6 +134,7 @@ export class H5TrackerAdapter implements TrackerAdapter {
    * 这里返回统一的 TrackingViewport，避免在 UTS 里再去推导匿名对象字面量。
    */
   private createViewportProvider(viewport : TrackingViewport) : (() => TrackingViewport) {
+    // UTS 里直接返回匿名对象时有时会让类型推断变得别扭，所以这里显式包一层。
     return () : TrackingViewport => {
       return new TrackingViewport(viewport.width, viewport.height)
     }
@@ -133,6 +158,7 @@ export class H5TrackerAdapter implements TrackerAdapter {
     for (let i = 0; i < sourceHands.length; i++) {
       const source = sourceHands[i]
       const hand = new DetectedHand()
+      // 这里不做业务判断，只负责把 JS 层的松散对象变成共享层稳定结构。
       hand.label = source.label
       hand.confidence = source.confidence
       hand.centerX = source.centerX
@@ -156,6 +182,7 @@ export class H5TrackerAdapter implements TrackerAdapter {
    */
   private mapRuntimeInfo(runtimeSource : H5RawRuntimeInfo, viewport : TrackingViewport) : TrackingRuntimeInfo {
     const runtime = new TrackingRuntimeInfo()
+    // 这些默认值是给页面调试面板用的，避免模板层到处判空。
     const backendName = runtimeSource.backendName.length > 0 ? runtimeSource.backendName : 'CPU'
     runtime.backendLabel = runtimeSource.backendLabel.length > 0
       ? runtimeSource.backendLabel
@@ -187,6 +214,15 @@ export class H5TrackerAdapter implements TrackerAdapter {
    */
   private emitError(message : string) : void {
     const callback = this.errorCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(message)
+  }
+
+  private emitDebug(message : string) : void {
+    const callback = this.debugCallback
     if (callback == null) {
       return
     }

@@ -1,0 +1,47 @@
+<template>
+	<native-view class="android-preview-host" @init="onPreviewInit"></native-view>
+</template>
+
+<script setup lang="uts">
+	import { onUnmounted } from 'vue'
+
+	const emit = defineEmits<{
+		(e : 'previewReady', element : UniNativeViewElement) : void
+		(e : 'previewDestroyed') : void
+		(e : 'previewDebug', message : string) : void
+	}>()
+
+	function logPreviewHost(message : string) : void {
+		emit('previewDebug', message)
+	}
+
+	function onPreviewInit(e : UniNativeViewInitEvent) : void {
+		const element = e.detail.element
+		if (element == null) {
+			logPreviewHost('native-view init, but element is null')
+			return
+		}
+
+		logPreviewHost('native-view init, emit previewReady')
+		emit('previewReady', element)
+	}
+
+	onUnmounted(() => {
+		logPreviewHost('emit previewDestroyed')
+		emit('previewDestroyed')
+	})
+</script>
+
+<style>
+	.android-preview-host {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: 100%;
+		height: 100%;
+		z-index: 0;
+		background-color: #08111f;
+	}
+</style>

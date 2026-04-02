@@ -1,5 +1,8 @@
 import { TrackingPresenter } from '../../shared/tracking/presenter.uts'
-import { TrackingFrame, TrackingRuntimeInfo, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
+import { HandPoint, TrackingFrame, TrackingRuntimeInfo, TrackingSnapshot, TrackingViewport } from '../../shared/tracking/models.uts'
+// #ifdef APP-ANDROID
+import { AndroidTrackerAdapter } from './adapters/android-tracker-adapter.uts'
+// #endif
 // #ifdef WEB
 import { H5TrackerAdapter } from './adapters/h5-tracker-adapter.uts'
 // #endif
@@ -10,82 +13,313 @@ import { TrackerAdapter } from './adapters/tracker-adapter.uts'
  *
  * 它位于“页面”和“平台适配器”之间，负责把底层结果整理成页面能直接消费的快照。
  * 页面层不需要知道底层追踪会话如何实现，只需要和这个服务交互。
- *
- * 修改注意：
- * - 页面相关字段尽量继续通过 TrackingSnapshot 下发；
- * - 不要让页面直接越过服务层去依赖具体适配器。
  */
 export class TrackerService {
   private presenter : TrackingPresenter = new TrackingPresenter()
   private snapshotListener : ((snapshot : TrackingSnapshot) => void) | null = null
+  private debugListener : ((message : string) => void) | null = null
   private activeAdapter : TrackerAdapter | null = null
   private started : boolean = false
+  private activeViewport : TrackingViewport | null = null
+  private adapterRunning : boolean = false
+  /**
+   * 视觉类快照发布最小间隔。
+   *
+   * 原生追踪可以继续尽量实时地收帧，但页面侧不需要每 33ms 都重新刷一轮，
+   * 这里把视觉发布窗口收紧到 66ms，用来压低 UniDomManager 和响应式调度压力。
+   */
+  private snapshotVisualThrottleMs : number = 66
+  /**
+   * 低频文本类快照发布最小间隔。
+   *
+   * backend / fps / resolution 这类调试文本不参与实时跟手判断，允许更慢一些再写入页面。
+   */
+  private snapshotTextThrottleMs : number = 250
+  private snapshotPublishScheduled : boolean = false
+  private snapshotPublishTimer : number | null = null
+  private snapshotPublishDueAt : number = 0
+  private snapshotPublishKind : number = 0
+  private frameApplyCount : number = 0
+  private snapshotFlushCount : number = 0
+  private snapshotQueueCoalesceCount : number = 0
+  private lastSnapshotPublishAt : number = 0
+  private lastFrameReceivedAt : number = 0
+  private snapshotPublishSamples : Array<number> = []
+  private snapshotPublishWindowSize : number = 120
+  private lastPublishedTrackingState : string = ''
+  private lastPublishedStatusText : string = ''
+  private lastPublishedBackendText : string = ''
+  private lastPublishedFpsText : string = ''
+  private lastPublishedResolutionText : string = ''
+  private lastPublishedRuntimeMessage : string = ''
+  private lastPublishedLeftVisible : boolean = false
+  private lastPublishedLeftX : number = 0
+  private lastPublishedLeftY : number = 0
+  private lastPublishedLeftConfidence : number = 0
+  private lastPublishedLeftSize : number = 0
+  private lastPublishedLeftScale : number = 0
+  private lastPublishedRightVisible : boolean = false
+  private lastPublishedRightX : number = 0
+  private lastPublishedRightY : number = 0
+  private lastPublishedRightConfidence : number = 0
+  private lastPublishedRightSize : number = 0
+  private lastPublishedRightScale : number = 0
+  private readonly snapshotPublishKindNone : number = 0
+  private readonly snapshotPublishKindText : number = 1
+  private readonly snapshotPublishKindVisual : number = 2
 
   onSnapshot(callback : (snapshot : TrackingSnapshot) => void) : void {
     this.snapshotListener = callback
+  }
+
+  onDebug(callback : (message : string) => void) : void {
+    this.debugListener = callback
   }
 
   getSnapshot() : TrackingSnapshot {
     return this.presenter.createSnapshot()
   }
 
-  /**
-   * 启动追踪服务。
-   *
-   * 输入：
-   * - viewport：当前页面的可视区域尺寸
-   *
-   * 核心步骤：
-   * 1. 标记服务已启动；
-   * 2. 立即发布“启动中”快照，让页面先进入过渡状态；
-   * 3. 选择当前平台对应的适配器；
-   * 4. 监听 frame / error，再把结果交给 presenter。
-   */
   start(viewport : TrackingViewport) : void {
+    this.activeViewport = viewport
+    this.emitDebug('TrackerService: start viewport=' + viewport.width + 'x' + viewport.height)
     if (this.started) {
+      this.proceedStartSequence()
       return
     }
 
     this.started = true
-    this.presenter.markStarting()
-    this.publishSnapshot()
-    this.activeAdapter = this.createAdapter()
-    this.activeAdapter.onFrame((frame : TrackingFrame, runtime : TrackingRuntimeInfo) => {
-      this.presenter.applyFrame(frame, runtime)
-      this.publishSnapshot()
-    })
-    this.activeAdapter.onError((message : string) => {
-      this.presenter.markError(message)
-      this.publishSnapshot()
-    })
-
-    this.activeAdapter.start(viewport)
+    this.presenter.markStarting('正在准备相机预览。')
+    this.queueSnapshotPublish(this.snapshotPublishKindVisual)
+    this.ensureAdapter()
+    this.proceedStartSequence()
   }
 
   stop() : void {
+    this.started = false
+    this.adapterRunning = false
+    this.clearSnapshotPublishTimer()
     if (this.activeAdapter != null) {
       this.activeAdapter.stop()
-      this.activeAdapter = null
     }
 
-    this.started = false
+    this.activeViewport = null
+    this.frameApplyCount = 0
+    this.snapshotFlushCount = 0
+    this.snapshotQueueCoalesceCount = 0
+    this.lastSnapshotPublishAt = 0
+    this.flushSnapshotPublishBenchmark()
+    this.lastFrameReceivedAt = 0
+    this.snapshotPublishSamples = []
     this.presenter.reset()
     this.publishSnapshot()
   }
 
-  /**
-   * 把 presenter 生成的最新快照推给页面监听者。
-   *
-   * 这里单独封装成函数，是为了保证页面拿到快照的时机统一，
-   * 后续如果增加埋点、日志或节流策略，也只需要改这一处。
-   */
-  private publishSnapshot() : void {
-    this.emitSnapshot(this.presenter.createSnapshot())
+  attachPreviewHost(element : UniNativeViewElement) : void {
+    this.emitDebug('TrackerService: attachPreviewHost element=true')
+    const adapter = this.ensureAdapter()
+    adapter.attachPreviewHost(element)
+    if (!this.started) {
+      return
+    }
+
+    this.presenter.markStarting('预览宿主已就绪，正在准备启动相机。')
+    this.queueSnapshotPublish(this.snapshotPublishKindVisual)
+    this.proceedStartSequence()
+  }
+
+  detachPreviewHost() : void {
+    this.emitDebug('TrackerService: detachPreviewHost')
+    if (this.activeAdapter == null) {
+      return
+    }
+
+    this.activeAdapter.detachPreviewHost()
+    this.adapterRunning = false
+    this.lastFrameReceivedAt = 0
+    if (this.started) {
+      this.presenter.markStarting('正在等待预览宿主重新挂载。')
+    }
+    this.queueSnapshotPublish(this.snapshotPublishKindVisual)
+  }
+
+  private publishSnapshot() : boolean {
+    this.clearSnapshotPublishTimer()
+    if (this.snapshotListener == null) {
+      return false
+    }
+
+    const snapshot = this.presenter.createSnapshot()
+    if (!this.hasMeaningfulSnapshotChange(snapshot)) {
+      return false
+    }
+
+    this.emitSnapshot(snapshot)
+    this.capturePublishedSnapshot(snapshot)
+    this.recordSnapshotPublishLatency(Date.now())
+    return true
+  }
+
+  private queueSnapshotPublish(kind : number = this.snapshotPublishKindVisual) : void {
+    this.snapshotPublishScheduled = true
+    const now = Date.now()
+    const throttleMs = kind == this.snapshotPublishKindText ? this.snapshotTextThrottleMs : this.snapshotVisualThrottleMs
+    const dueAt = now + throttleMs
+
+    if (this.snapshotPublishTimer != null) {
+      this.snapshotQueueCoalesceCount += 1
+      if (this.snapshotQueueCoalesceCount == 1 || this.snapshotQueueCoalesceCount % 120 == 0) {
+        this.emitDebug(
+          'TrackerService perf: snapshot request coalesced count=' +
+            this.snapshotQueueCoalesceCount +
+            ', throttle=' +
+            throttleMs +
+            'ms'
+        )
+      }
+      if (this.snapshotPublishKind >= kind && this.snapshotPublishDueAt <= dueAt) {
+        return
+      }
+
+      const previousTimer = this.snapshotPublishTimer
+      if (previousTimer != null) {
+        clearTimeout(previousTimer)
+      }
+    }
+
+    this.snapshotPublishKind = kind
+    this.snapshotPublishDueAt = dueAt
+    this.snapshotPublishTimer = setTimeout(() => {
+      const flushStartedAt = Date.now()
+      this.snapshotPublishTimer = null
+      this.snapshotPublishDueAt = 0
+      this.snapshotPublishKind = this.snapshotPublishKindNone
+      if (!this.snapshotPublishScheduled) {
+        return
+      }
+
+      this.snapshotPublishScheduled = false
+      const emitted = this.publishSnapshot()
+      if (emitted) {
+        this.snapshotFlushCount += 1
+        const waitedMs = flushStartedAt - (dueAt - throttleMs)
+        const sinceLastPublishMs = this.lastSnapshotPublishAt > 0 ? (flushStartedAt - this.lastSnapshotPublishAt) : 0
+        this.lastSnapshotPublishAt = flushStartedAt
+        this.tracePerf('publishSnapshot', this.snapshotFlushCount, Date.now() - flushStartedAt)
+        if (waitedMs >= throttleMs || this.snapshotQueueCoalesceCount > 0 || this.snapshotFlushCount % 120 == 0) {
+          this.emitDebug(
+            'TrackerService perf: publishSnapshot wait=' +
+              waitedMs +
+              'ms, sinceLast=' +
+              sinceLastPublishMs +
+              'ms, coalesced=' +
+              this.snapshotQueueCoalesceCount +
+              ', throttle=' +
+              throttleMs +
+              'ms'
+          )
+        }
+      }
+      this.snapshotQueueCoalesceCount = 0
+    }, throttleMs)
   }
 
   /**
-   * 统一触发快照回调，避免在多个位置直接调用可空监听器字段。
+   * 只有当前快照真的和上一次已发布快照有差异时，才值得重新安排一次发布。
+   *
+   * 这里不是简单地“每帧都发”或“完全不发”，而是把发布预算拆成两档：
+   * - 视觉变化、状态切换走快速档，尽量保持手部跟手；
+   * - 只有调试文本变化时走慢速档，减少页面和调试信息的重复刷新。
    */
+  private queueSnapshotPublishIfNeeded(snapshot : TrackingSnapshot) : void {
+    const kind = this.resolveSnapshotPublishKind(snapshot)
+    if (kind == this.snapshotPublishKindNone) {
+      return
+    }
+
+    this.queueSnapshotPublish(kind)
+  }
+
+  private clearSnapshotPublishTimer() : void {
+    const timer = this.snapshotPublishTimer
+    if (timer != null) {
+      clearTimeout(timer)
+    }
+
+    this.snapshotPublishTimer = null
+    this.snapshotPublishScheduled = false
+    this.snapshotPublishDueAt = 0
+    this.snapshotPublishKind = this.snapshotPublishKindNone
+  }
+
+  private tracePerf(stage : string, count : number, costMs : number) : void {
+    if (costMs < 12 && count % 120 != 0) {
+      return
+    }
+
+    this.emitDebug('TrackerService perf: ' + stage + ' count=' + count + ', cost=' + costMs + 'ms')
+  }
+
+  private recordSnapshotPublishLatency(publishStartedAt : number) : void {
+    if (this.lastFrameReceivedAt <= 0) {
+      return
+    }
+
+    const duration = publishStartedAt - this.lastFrameReceivedAt
+    if (duration < 0) {
+      return
+    }
+
+    this.snapshotPublishSamples.push(duration)
+    if (this.snapshotPublishSamples.length < this.snapshotPublishWindowSize) {
+      return
+    }
+
+    const samples = this.snapshotPublishSamples.slice().sort((a : number, b : number) : number => {
+      return a - b
+    })
+    const p50 = samples[Math.floor((samples.length - 1) * 0.5)]
+    const p95 = samples[Math.floor((samples.length - 1) * 0.95)]
+    const max = samples[samples.length - 1]
+    this.emitDebug(
+      'TrackerService bench: frame->publish samples=' +
+        samples.length +
+        ', p50=' +
+        p50 +
+        'ms, p95=' +
+        p95 +
+        'ms, max=' +
+        max +
+        'ms'
+    )
+    this.snapshotPublishSamples = []
+  }
+
+  private flushSnapshotPublishBenchmark() : void {
+    if (this.snapshotPublishSamples.length <= 0) {
+      return
+    }
+
+    const samples = this.snapshotPublishSamples.slice().sort((a : number, b : number) : number => {
+      return a - b
+    })
+    const p50 = samples[Math.floor((samples.length - 1) * 0.5)]
+    const p95 = samples[Math.floor((samples.length - 1) * 0.95)]
+    const max = samples[samples.length - 1]
+    this.emitDebug(
+      'TrackerService bench: frame->publish samples=' +
+        samples.length +
+        ', p50=' +
+        p50 +
+        'ms, p95=' +
+        p95 +
+        'ms, max=' +
+        max +
+        'ms'
+    )
+    this.snapshotPublishSamples = []
+  }
+
   private emitSnapshot(snapshot : TrackingSnapshot) : void {
     const listener = this.snapshotListener
     if (listener == null) {
@@ -95,22 +329,218 @@ export class TrackerService {
     listener(snapshot)
   }
 
-  /**
-   * 按当前平台选择适配器。
-   *
-   * 当前工程只保留 H5 追踪链路，因此这里只返回 H5 适配器。
-   */
-  private createAdapter() : TrackerAdapter {
+  private hasMeaningfulSnapshotChange(snapshot : TrackingSnapshot) : boolean {
+    if (this.hasStatusSnapshotChange(snapshot)) {
+      return true
+    }
+
+    if (this.hasVisualSnapshotChange(snapshot)) {
+      return true
+    }
+
+    if (this.hasAuxSnapshotChange(snapshot)) {
+      return true
+    }
+
+    return false
+  }
+
+  private hasStatusSnapshotChange(snapshot : TrackingSnapshot) : boolean {
+    // 状态切换属于页面可见信息，不能被低频文本节流吞掉。
+    if (snapshot.trackingState != this.lastPublishedTrackingState) {
+      return true
+    }
+    if (snapshot.statusText != this.lastPublishedStatusText) {
+      return true
+    }
+    if (snapshot.runtimeMessage != this.lastPublishedRuntimeMessage) {
+      return true
+    }
+
+    return false
+  }
+
+  private hasVisualSnapshotChange(snapshot : TrackingSnapshot) : boolean {
+    // 手部位置、显隐和缩放直接决定 marker 是否需要重绘。
+    if (snapshot.leftScale != this.lastPublishedLeftScale) {
+      return true
+    }
+    if (snapshot.rightScale != this.lastPublishedRightScale) {
+      return true
+    }
+
+    if (this.isHandChanged(snapshot.frame.leftHand, this.lastPublishedLeftVisible, this.lastPublishedLeftX, this.lastPublishedLeftY)) {
+      return true
+    }
+
+    if (this.isHandChanged(snapshot.frame.rightHand, this.lastPublishedRightVisible, this.lastPublishedRightX, this.lastPublishedRightY)) {
+      return true
+    }
+
+    return false
+  }
+
+  private hasAuxSnapshotChange(snapshot : TrackingSnapshot) : boolean {
+    // backend / fps / resolution 只影响调试信息，不参与跟手判断。
+    if (snapshot.backendText != this.lastPublishedBackendText) {
+      return true
+    }
+    if (snapshot.fpsText != this.lastPublishedFpsText) {
+      return true
+    }
+    if (snapshot.resolutionText != this.lastPublishedResolutionText) {
+      return true
+    }
+
+    return false
+  }
+
+  private resolveSnapshotPublishKind(snapshot : TrackingSnapshot) : number {
+    if (this.hasStatusSnapshotChange(snapshot) || this.hasVisualSnapshotChange(snapshot)) {
+      return this.snapshotPublishKindVisual
+    }
+
+    if (this.hasAuxSnapshotChange(snapshot)) {
+      return this.snapshotPublishKindText
+    }
+
+    return this.snapshotPublishKindNone
+  }
+
+  private isHandChanged(hand : HandPoint | null, lastVisible : boolean, lastX : number, lastY : number) : boolean {
+    if (hand == null) {
+      return lastVisible
+    }
+
+    if (!lastVisible) {
+      return true
+    }
+
+    if (hand.x != lastX || hand.y != lastY) {
+      return true
+    }
+
+    return false
+  }
+
+  private capturePublishedSnapshot(snapshot : TrackingSnapshot) : void {
+    this.lastPublishedTrackingState = snapshot.trackingState
+    this.lastPublishedStatusText = snapshot.statusText
+    this.lastPublishedBackendText = snapshot.backendText
+    this.lastPublishedFpsText = snapshot.fpsText
+    this.lastPublishedResolutionText = snapshot.resolutionText
+    this.lastPublishedRuntimeMessage = snapshot.runtimeMessage
+    this.lastPublishedLeftScale = snapshot.leftScale
+    this.lastPublishedRightScale = snapshot.rightScale
+
+    const leftHand = snapshot.frame.leftHand
+    if (leftHand == null) {
+      this.lastPublishedLeftVisible = false
+      this.lastPublishedLeftX = 0
+      this.lastPublishedLeftY = 0
+      this.lastPublishedLeftConfidence = 0
+      this.lastPublishedLeftSize = 0
+    } else {
+      this.lastPublishedLeftVisible = true
+      this.lastPublishedLeftX = leftHand.x
+      this.lastPublishedLeftY = leftHand.y
+      this.lastPublishedLeftConfidence = leftHand.confidence
+      this.lastPublishedLeftSize = leftHand.size
+    }
+
+    const rightHand = snapshot.frame.rightHand
+    if (rightHand == null) {
+      this.lastPublishedRightVisible = false
+      this.lastPublishedRightX = 0
+      this.lastPublishedRightY = 0
+      this.lastPublishedRightConfidence = 0
+      this.lastPublishedRightSize = 0
+    } else {
+      this.lastPublishedRightVisible = true
+      this.lastPublishedRightX = rightHand.x
+      this.lastPublishedRightY = rightHand.y
+      this.lastPublishedRightConfidence = rightHand.confidence
+      this.lastPublishedRightSize = rightHand.size
+    }
+  }
+
+  private ensureAdapter() : TrackerAdapter {
+    if (this.activeAdapter != null) {
+      return this.activeAdapter
+    }
+
     let adapter : TrackerAdapter | null = null
 
+    // #ifdef APP-ANDROID
+    adapter = new AndroidTrackerAdapter()
+    // #endif
+
     // #ifdef WEB
-    adapter = new H5TrackerAdapter()
+    if (adapter == null) {
+      adapter = new H5TrackerAdapter()
+    }
     // #endif
 
     if (adapter == null) {
       throw new Error('当前平台没有可用的追踪适配器')
     }
 
+    adapter.onFrame((frame : TrackingFrame, runtime : TrackingRuntimeInfo) => {
+      if (!this.started) {
+        return
+      }
+
+      this.lastFrameReceivedAt = Date.now()
+      const applyStartedAt = Date.now()
+      this.presenter.applyFrame(frame, runtime)
+      const snapshot = this.presenter.createSnapshot()
+      this.frameApplyCount += 1
+      this.tracePerf('applyFrame', this.frameApplyCount, Date.now() - applyStartedAt)
+      this.queueSnapshotPublishIfNeeded(snapshot)
+    })
+    adapter.onError((message : string) => {
+      this.adapterRunning = false
+      this.lastFrameReceivedAt = 0
+      this.presenter.markError(message)
+      this.publishSnapshot()
+    })
+    adapter.onDebug((message : string) => {
+      this.emitDebug(message)
+    })
+    this.activeAdapter = adapter
     return adapter
+  }
+
+  private proceedStartSequence() : void {
+    if (!this.started) {
+      return
+    }
+
+    const viewport = this.activeViewport
+    if (viewport == null) {
+      this.emitDebug('TrackerService: waiting viewport')
+      this.presenter.markStarting('正在等待页面视口准备完成。')
+      this.queueSnapshotPublish(this.snapshotPublishKindVisual)
+      return
+    }
+
+    const adapter = this.ensureAdapter()
+    if (this.adapterRunning) {
+      return
+    }
+
+    this.presenter.markStarting('正在准备相机预览。')
+    this.queueSnapshotPublish(this.snapshotPublishKindVisual)
+    this.adapterRunning = true
+    adapter.start(viewport)
+  }
+
+  private emitDebug(message : string) : void {
+    const listener = this.debugListener
+    if (listener == null) {
+      return
+    }
+
+    listener(message)
   }
 }

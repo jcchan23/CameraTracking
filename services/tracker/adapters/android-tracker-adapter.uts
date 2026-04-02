@@ -1,0 +1,178 @@
+import { clamp } from '../../../shared/tracking/math.uts'
+import { HandPoint, TrackingFrame, TrackingRuntimeInfo, TrackingViewport } from '../../../shared/tracking/models.uts'
+import { TrackerAdapter } from './tracker-adapter.uts'
+import { HandTrackerFramePayload, HandTrackerHand, HandTrackerRuntimeInfo, HandTrackerViewport } from '@/uni_modules/hand-tracker/utssdk/interface.uts'
+import { createHandTrackerSession } from '@/uni_modules/hand-tracker'
+import type { HandTrackerSession } from '@/uni_modules/hand-tracker/utssdk/interface.uts'
+
+/**
+ * Android 追踪适配层。
+ *
+ * 这一层只做协议翻译：
+ * - 从 Android session 接收原始手部结果；
+ * - 统一整理成共享层的 TrackingFrame / TrackingRuntimeInfo；
+ * - 再交给 TrackerService 和 presenter。
+ *
+ * 它不申请摄像头，也不直接持有原生预览 View。
+ */
+export class AndroidTrackerAdapter implements TrackerAdapter {
+  private frameCallback : ((frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) | null = null
+  private errorCallback : ((message : string) => void) | null = null
+  private debugCallback : ((message : string) => void) | null = null
+  private session : HandTrackerSession | null = null
+  // 这些缓冲对象只在 Android 适配层内部复用，用来减少每帧创建 TrackingFrame / HandPoint / RuntimeInfo 的次数。
+  private reusableFrame : TrackingFrame = new TrackingFrame()
+  private reusableLeftHand : HandPoint = new HandPoint()
+  private reusableRightHand : HandPoint = new HandPoint()
+  private reusableRuntime : TrackingRuntimeInfo = new TrackingRuntimeInfo()
+
+  attachPreviewHost(element : UniNativeViewElement) : void {
+    this.emitDebug('AndroidTrackerAdapter: attachPreviewHost element=true')
+    if (this.session == null) {
+      this.session = createHandTrackerSession()
+    }
+
+    const session = this.session
+    if (session == null) {
+      throw new Error('Android TrackerSession 创建失败')
+    }
+
+    const debugCallback = this.debugCallback
+    if (debugCallback != null) {
+      session.bindDebug(debugCallback)
+    }
+
+    session.bindPreviewHost(element)
+  }
+
+  detachPreviewHost() : void {
+    this.emitDebug('AndroidTrackerAdapter: detachPreviewHost')
+    if (this.session != null) {
+      this.session.stop()
+      this.session = null
+    }
+  }
+
+  onFrame(callback : (frame : TrackingFrame, runtime : TrackingRuntimeInfo) => void) : void {
+    this.frameCallback = callback
+  }
+
+  onError(callback : (message : string) => void) : void {
+    this.errorCallback = callback
+  }
+
+  onDebug(callback : (message : string) => void) : void {
+    this.debugCallback = callback
+    const session = this.session
+    if (session != null) {
+      session.bindDebug(callback)
+    }
+  }
+
+  start(viewport : TrackingViewport) : void {
+    this.emitDebug('AndroidTrackerAdapter: start viewport=' + viewport.width + 'x' + viewport.height)
+    if (this.session == null) {
+      this.session = createHandTrackerSession()
+    }
+
+    const session = this.session
+    if (session == null) {
+      throw new Error('Android TrackerSession 创建失败')
+    }
+
+    const debugCallback = this.debugCallback
+    if (debugCallback != null) {
+      session.bindDebug(debugCallback)
+    }
+
+    const appBaseInfo = uni.getAppBaseInfo()
+    const appId = appBaseInfo.appId == null ? '' : appBaseInfo.appId
+    if (appId.length == 0) {
+      throw new Error('无法读取当前应用 appId，无法初始化 Android 手部模型路径')
+    }
+
+    session.start({
+      viewportProvider: () : HandTrackerViewport => {
+        return new HandTrackerViewport(viewport.width, viewport.height)
+      },
+      appId: appId,
+      onFrame: (payload : HandTrackerFramePayload) : void => {
+        const nextFrame = this.normalizeFrame(payload, viewport)
+        const runtime = this.normalizeRuntime(payload.runtime, viewport)
+        this.emitFrame(nextFrame, runtime)
+      },
+      onError: (message : string) : void => {
+        this.emitError(message)
+      },
+      onDebug: (message : string) : void => {
+        this.emitDebug(message)
+      }
+    })
+  }
+
+  stop() : void {
+    const session = this.session
+    if (session != null) {
+      this.emitDebug('AndroidTrackerAdapter: stop')
+      session.stop()
+      this.session = null
+    }
+  }
+
+  private normalizeFrame(payload : HandTrackerFramePayload, viewport : TrackingViewport) : TrackingFrame {
+    const frame = this.reusableFrame
+    frame.leftHand = this.normalizeSingleHand(payload.leftHand, viewport, this.reusableLeftHand)
+    frame.rightHand = this.normalizeSingleHand(payload.rightHand, viewport, this.reusableRightHand)
+    return frame
+  }
+
+  private normalizeSingleHand(source : HandTrackerHand | null, viewport : TrackingViewport, target : HandPoint) : HandPoint | null {
+    if (source == null || !source.visible) {
+      return null
+    }
+
+    target.x = clamp(source.centerX, 0, viewport.width)
+    target.y = clamp(source.centerY, 0, viewport.height)
+    target.confidence = source.confidence
+    target.size = source.size
+    return target
+  }
+
+  private normalizeRuntime(runtimeSource : HandTrackerRuntimeInfo, viewport : TrackingViewport) : TrackingRuntimeInfo {
+    const runtime = this.reusableRuntime
+    runtime.backendLabel = runtimeSource.backendLabel.length > 0 ? runtimeSource.backendLabel : ('后端: ' + runtimeSource.backendName)
+    runtime.fpsLabel = runtimeSource.fpsLabel.length > 0 ? runtimeSource.fpsLabel : '帧率: --'
+    runtime.resolutionLabel = runtimeSource.resolutionLabel.length > 0
+      ? runtimeSource.resolutionLabel
+      : ('分辨率: ' + viewport.width + 'x' + viewport.height)
+    runtime.message = runtimeSource.message.length > 0 ? runtimeSource.message : 'Android UTS 手部追踪运行中。'
+    return runtime
+  }
+
+  private emitFrame(frame : TrackingFrame, runtime : TrackingRuntimeInfo) : void {
+    const callback = this.frameCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(frame, runtime)
+  }
+
+  private emitError(message : string) : void {
+    const callback = this.errorCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(message)
+  }
+
+  private emitDebug(message : string) : void {
+    const callback = this.debugCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(message)
+  }
+}

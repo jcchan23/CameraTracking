@@ -4,20 +4,23 @@ import { DetectedHand, StabilizedHands } from './models.uts'
  * 左右手稳定分配器。
  *
  * 模型输出在真实场景中可能出现 handedness 单帧翻转，
- * 因此这里沿用 v1 的思路，结合历史位置连续性做稳定分配。
+ * 因此这里结合当前会话内的空间连续性做稳定分配。
  *
  * 这部分逻辑放在 shared 层而不是 detector 层，原因是：
  * - 左右手标签抖动属于页面消费检测结果之前的统一业务规则；
  * - 这不应该绑死在某个模型 SDK 的实现细节里。
  */
 export class HandAssignmentStabilizer {
+  // 保存当前会话最近一次稳定后的左右手，用于下一次连续性判断。
   private lastLeft : DetectedHand | null = null
   private lastRight : DetectedHand | null = null
+  // 当模型单帧翻转左右手标签时，先暂存翻转候选，确认连续多帧后再真正切换。
   private pendingSwitchKey : string = ''
   private pendingSwitchFrames : number = 0
   private readonly confirmFrames : number = 2
 
   reset() : void {
+    // 新会话或重启时调用，清空当前稳定状态。
     this.lastLeft = null
     this.lastRight = null
     this.pendingSwitchKey = ''
@@ -25,6 +28,7 @@ export class HandAssignmentStabilizer {
   }
 
   stabilize(rawHands : Array<DetectedHand>) : StabilizedHands {
+    // 没有检测结果时，直接返回按当前标签映射的结果，不做额外猜测。
     if (rawHands.length == 0) {
       this.pendingSwitchKey = ''
       this.pendingSwitchFrames = 0
@@ -32,6 +36,7 @@ export class HandAssignmentStabilizer {
     }
 
     if (this.lastLeft == null && this.lastRight == null) {
+      // 当前还没有稳定基线时，先按模型标签结果建立初始映射。
       const initialHands = this.mapHandsByCurrentLabel(rawHands)
       this.rememberHands(initialHands)
       return initialHands
@@ -42,10 +47,12 @@ export class HandAssignmentStabilizer {
     let nextRight : DetectedHand | null = null
 
     if (this.lastLeft != null) {
+      // 优先找离上一帧左手位置最近的结果，降低左右手跳变。
       nextLeft = this.pickClosestHand(this.lastLeft!, remainingHands)
     }
 
     if (this.lastRight != null) {
+      // 同理，右手也按最近距离做连续性匹配。
       nextRight = this.pickClosestHand(this.lastRight!, remainingHands)
     }
 
@@ -82,6 +89,7 @@ export class HandAssignmentStabilizer {
   }
 
   private mapHandsByCurrentLabel(hands : Array<DetectedHand>) : StabilizedHands {
+    // 直接按模型当前 handedness 做映射，是最基础的兜底逻辑。
     let left : DetectedHand | null = null
     let right : DetectedHand | null = null
 
@@ -128,6 +136,7 @@ export class HandAssignmentStabilizer {
   }
 
   private confirmLabelSwitch(nextLeft : DetectedHand | null, nextRight : DetectedHand | null, rawHands : Array<DetectedHand>) : StabilizedHands {
+    // 先判断当前结果是否出现 handedness 变化。
     let switchKey = ''
     let switched = false
 
@@ -174,6 +183,7 @@ export class HandAssignmentStabilizer {
   }
 
   private measureDistance(a : DetectedHand, b : DetectedHand) : number {
+    // 用平方距离即可，不必开方，性能更轻。
     const dx = a.centerX - b.centerX
     const dy = a.centerY - b.centerY
     return (dx * dx) + (dy * dy)

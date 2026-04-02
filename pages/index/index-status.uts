@@ -1,0 +1,131 @@
+import { ref } from 'vue'
+import type { Ref } from 'vue'
+import { TrackingSnapshot } from '../../shared/tracking/models.uts'
+
+/**
+ * 状态面板展示对象。
+ *
+ * 这份对象只承载状态面板真正要展示的字段，并且只作为模块内普通对象缓存使用。
+ * 页面通过单个版本号驱动重新渲染，从而减少 UniDomManager 的碎片化批处理。
+ */
+export type TrackingStatusPresentation = {
+  trackingState : string
+  statusText : string
+  backendText : string
+  fpsText : string
+  resolutionText : string
+  runtimeMessage : string
+  runtimeChipClass : string
+}
+
+/**
+ * 状态面板缓存对象。
+ *
+ * 这份对象只作为变化检测和内部缓存使用，不再直接透传给组件。
+ */
+export const trackingStatusSnapshot : TrackingStatusPresentation = {
+  trackingState: 'idle',
+  statusText: '等待启动',
+  backendText: '后端: --',
+  fpsText: '帧率: --',
+  resolutionText: '分辨率: --',
+  runtimeMessage: '等待追踪服务启动。',
+  runtimeChipClass: 'runtime-chip-idle'
+}
+export const trackingStatusVersion = ref(0)
+
+/**
+ * 状态面板渲染绑定。
+ *
+ * 这里只暴露两类数据：
+ * - 一份模块内普通对象缓存
+ * - statusVersion：唯一的响应式触发点
+ */
+export type TrackingStatusBindings = {
+  statusVersion : Ref<number>
+  statusSnapshot : TrackingStatusPresentation
+  applySnapshot : (snapshot : TrackingSnapshot) => void
+  dispose : () => void
+}
+
+/**
+ * 状态面板渲染控制器。
+ *
+ * 这里把状态更新收口到模块内部，页面入口只负责拿结果和发版本号。
+ */
+export function createTrackingStatusBindings() : TrackingStatusBindings {
+  return {
+    statusVersion: trackingStatusVersion,
+    statusSnapshot: trackingStatusSnapshot,
+    applySnapshot: (snapshot : TrackingSnapshot) : void => {
+      if (applyTrackingSnapshot(snapshot, trackingStatusSnapshot)) {
+        trackingStatusVersion.value += 1
+      }
+    },
+    dispose: () : void => {
+      // 状态面板不持有额外资源，这里只作为页面 hide / unload 的统一收口入口。
+    }
+  }
+}
+
+/**
+ * 快照驱动的状态同步入口。
+ *
+ * 输入是 TrackingService 产出的 TrackingSnapshot，输出是状态面板当前要显示的字段缓存。
+ */
+function applyTrackingSnapshot(
+  snapshot : TrackingSnapshot,
+  statusSnapshot : TrackingStatusPresentation
+) : boolean {
+  const nextTrackingState = snapshot.trackingState
+  const nextStatusText = snapshot.statusText
+  const nextRuntimeMessage = snapshot.runtimeMessage.length > 0 ? snapshot.runtimeMessage : '等待追踪服务启动。'
+  const nextRuntimeChipClass = resolveRuntimeChipClass(snapshot.backendText)
+  let changed = false
+
+  if (statusSnapshot.trackingState != nextTrackingState) {
+    statusSnapshot.trackingState = nextTrackingState
+    changed = true
+  }
+  if (statusSnapshot.statusText != nextStatusText) {
+    statusSnapshot.statusText = nextStatusText
+    changed = true
+  }
+  if (statusSnapshot.runtimeMessage != nextRuntimeMessage) {
+    statusSnapshot.runtimeMessage = nextRuntimeMessage
+    changed = true
+  }
+  if (statusSnapshot.backendText != snapshot.backendText) {
+    statusSnapshot.backendText = snapshot.backendText
+    changed = true
+  }
+  if (statusSnapshot.fpsText != snapshot.fpsText) {
+    statusSnapshot.fpsText = snapshot.fpsText
+    changed = true
+  }
+  if (statusSnapshot.resolutionText != snapshot.resolutionText) {
+    statusSnapshot.resolutionText = snapshot.resolutionText
+    changed = true
+  }
+  if (statusSnapshot.runtimeChipClass != nextRuntimeChipClass) {
+    statusSnapshot.runtimeChipClass = nextRuntimeChipClass
+    changed = true
+  }
+
+  return changed
+}
+
+/**
+ * 根据后端标签映射运行时 chip 样式。
+ */
+function resolveRuntimeChipClass(backendLabel : string) : string {
+  if (backendLabel.indexOf('GPU') >= 0) {
+    return 'runtime-chip-gpu'
+  }
+
+  if (backendLabel.indexOf('CPU') >= 0) {
+    return 'runtime-chip-cpu'
+  }
+
+  return 'runtime-chip-idle'
+}

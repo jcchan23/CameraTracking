@@ -1,0 +1,23 @@
+import type { HandTrackerSession } from './interface.uts'
+/**
+ * hand-tracker 插件根入口。
+ *
+ * 这一层只负责把公共协议和平台实现重新接回 UTS 插件导出链路，
+ * 不承载任何业务逻辑，也不再引入项目内的二次包装层。
+ */
+
+export * from './interface.uts'
+
+// #ifdef APP-ANDROID
+import { HandTrackerSessionImpl } from './app-android/index.uts'
+
+/**
+ * 创建 Android 侧手部追踪会话。
+ *
+ * 这里保持为最薄工厂，只返回真正的 Android 实现，
+ * 方便导出产物继续生成插件对应的原生源码文件。
+ */
+export function createHandTrackerSession() : HandTrackerSession {
+  return new HandTrackerSessionImpl()
+}
+// #endif

@@ -1,0 +1,112 @@
+<template>
+	<view class="status-panel">
+		<view class="status-chip" :class="'state-' + props.trackingState">
+			<text class="status-chip-text">{{ props.statusText }}</text>
+		</view>
+
+		<view class="runtime-chip" :class="props.runtimeChipClass">
+			<text class="runtime-chip-text">{{ props.backendText }}</text>
+		</view>
+
+		<view class="debug-chip">
+			<text class="debug-chip-line">{{ props.fpsText }}</text>
+			<text class="debug-chip-line">{{ props.resolutionText }}</text>
+			<text class="debug-chip-line">{{ props.runtimeMessage }}</text>
+		</view>
+	</view>
+</template>
+
+<script setup lang="uts">
+	const props = defineProps<{
+		trackingState : string
+		statusText : string
+		backendText : string
+		fpsText : string
+		resolutionText : string
+		runtimeMessage : string
+		runtimeChipClass : string
+		statusVersion : number
+	}>()
+</script>
+
+<style>
+	/* 左上状态面板：固定在页面左上，和摄像头画面脱离布局流，避免被内容挤动。 */
+	.status-panel {
+		position: fixed;
+		left: 24rpx;
+		top: 24rpx;
+		z-index: 10;
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	/* 三种信息胶囊共用同一套基础盒模型，属于模板里静态 class 直接命中的样式。 */
+	.status-chip,
+	.runtime-chip,
+	.debug-chip {
+		margin-bottom: 14rpx;
+		padding: 16rpx 20rpx;
+		border-radius: 22rpx;
+		background-color: rgba(15, 23, 42, 0.72);
+		box-shadow: 0 14rpx 34rpx rgba(0, 0, 0, 0.16);
+	}
+
+	/* 信息块单独限制宽度，避免长文本直接铺满上方区域。 */
+	.debug-chip {
+		max-width: 430rpx;
+	}
+
+	/* 文本样式集中放在一起，维护时能快速知道字号和颜色在哪里改。 */
+	.status-chip-text,
+	.runtime-chip-text,
+	.debug-chip-line {
+		color: #ffffff;
+	}
+
+	.status-chip-text,
+	.runtime-chip-text {
+		font-size: 24rpx;
+		font-weight: 600;
+	}
+
+	/* 信息文本单独控制行高和透明度，避免和状态标题文本混在一起难找。 */
+	.debug-chip-line {
+		font-size: 22rpx;
+		line-height: 32rpx;
+		opacity: 0.88;
+	}
+
+	/* 状态颜色变体：模板里不会写完整类名，但会由 trackingState 在运行时动态命中。 */
+	.state-idle {
+		background-color: rgba(71, 85, 105, 0.86);
+	}
+
+	.state-starting {
+		background-color: rgba(14, 116, 144, 0.9);
+	}
+
+	.state-running {
+		background-color: rgba(22, 163, 74, 0.9);
+	}
+
+	.state-no-hands {
+		background-color: rgba(202, 138, 4, 0.92);
+	}
+
+	.state-error {
+		background-color: rgba(220, 38, 38, 0.92);
+	}
+
+	/* 运行时颜色变体：模板里不会写完整类名，但会由 runtimeChipClass 在运行时动态命中。 */
+	.runtime-chip-idle {
+		background-color: rgba(51, 65, 85, 0.86);
+	}
+
+	.runtime-chip-cpu {
+		background-color: rgba(59, 130, 246, 0.88);
+	}
+
+	.runtime-chip-gpu {
+		background-color: rgba(139, 92, 246, 0.9);
+	}
+</style>

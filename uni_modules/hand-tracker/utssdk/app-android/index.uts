@@ -1,0 +1,804 @@
+import Manifest from 'android.Manifest'
+import Context from 'android.content.Context'
+import ViewGroup from 'android.view.ViewGroup'
+import FrameLayout from 'android.widget.FrameLayout'
+import Build from 'android.os.Build'
+import SystemClock from 'android.os.SystemClock'
+import PreviewView from 'androidx.camera.view.PreviewView'
+import List from 'kotlin.collections.List'
+import NativeDetectedHand from 'uts.sdk.modules.handTracker.NativeDetectedHand'
+import HandTrackerCoordinator from 'uts.sdk.modules.handTracker.HandTrackerCoordinator'
+import type { HandTrackerFramePayload, HandTrackerHand, HandTrackerRuntimeInfo, HandTrackerSession, HandTrackerSessionStartOptions } from '../interface.uts'
+
+const SESSION_STAGE_IDLE = 'idle'
+const SESSION_STAGE_WAITING_PREVIEW_HOST_CREATED = 'waiting-preview-host-created'
+const SESSION_STAGE_BINDING_PREVIEW = 'binding-preview-host'
+const SESSION_STAGE_PREPARING_CAMERA = 'preparing-camera'
+const SESSION_STAGE_REQUESTING_PERMISSION = 'requesting-permission'
+const SESSION_STAGE_WAITING_PREVIEW_HOST_ATTACH = 'waiting-preview-host-attach'
+const SESSION_STAGE_PREVIEW_RUNNING = 'preview-running'
+const SESSION_STAGE_DETECTING = 'detecting'
+const SESSION_STAGE_ERROR = 'error'
+
+/**
+ * 这一组函数只做最基础的轻量转换。
+ *
+ * 它们不持有会话状态，不参与相机生命周期，也不负责页面行为决策。
+ * 后续维护时，如果只是字符串、数值、集合的局部转换，优先放在这一层。
+ */
+function errorLog(message : string) : void {
+  console.error(message)
+}
+
+function toRuntimeInfo(
+  width : Int,
+  height : Int,
+  fps : number,
+  message : string,
+  target : HandTrackerRuntimeInfo,
+  backendName : string = 'GPU',
+  backendLabel : string = '后端: Android UTS GPU'
+) : HandTrackerRuntimeInfo {
+  target.backendName = backendName
+  target.backendLabel = backendLabel
+  target.fpsLabel = fps > 0 ? ('帧率: ' + fps.toFixed(1)) : '帧率: --'
+  target.resolutionLabel = width > 0 && height > 0 ? ('分辨率: ' + width + 'x' + height) : '分辨率: --'
+  target.message = message
+  return target
+}
+
+/**
+ * 读取集合大小。
+ *
+ * 这里只处理空值保护，不引入任何业务判断。
+ */
+function readCollectionCount<T>(collection : List<T> | null) : Int {
+  if (collection == null) {
+    return 0
+  }
+
+  return collection.size
+}
+
+/**
+ * 读取集合元素。
+ *
+ * 这个函数只负责把“集合为空”这类边界情况收口掉，
+ * 方便上层循环保持线性写法。
+ */
+function readCollectionItem<T>(collection : List<T> | null, index : Int) : T | null {
+  if (collection == null) {
+    return null
+  }
+
+  return collection.get(index)
+}
+
+/**
+ * 坐标缩放的最小单元。
+ *
+ * 这里只做源尺寸到目标尺寸的比例换算，不处理镜像、不处理旋转，
+ * 也不决定页面最终怎么展示。
+ */
+function scaleCoordinate(value : number, sourceSize : number, targetSize : number) : number {
+  if (sourceSize <= 0 || targetSize <= 0) {
+    return value
+  }
+
+  return value / sourceSize * targetSize
+}
+
+/**
+ * 把原生检测结果翻译成页面层使用的单手对象。
+ *
+ * 这里只做字段拷贝和坐标换算，不做页面态判断。
+ */
+function createHandFromNative(
+  nativeHand : NativeDetectedHand,
+  sourceWidth : number,
+  sourceHeight : number,
+  targetWidth : number,
+  targetHeight : number,
+  target : HandTrackerHand
+) : HandTrackerHand {
+  target.label = nativeHand.label
+  target.visible = nativeHand.visible
+  target.confidence = nativeHand.confidence
+  // 这里把原生预览像素坐标统一换算到页面 viewport 坐标系，再交给 shared 层。
+  target.centerX = scaleCoordinate(nativeHand.centerX, sourceWidth, targetWidth)
+  target.centerY = scaleCoordinate(nativeHand.centerY, sourceHeight, targetHeight)
+  target.size = nativeHand.size
+  return target
+}
+
+/**
+ * 把原生手部结果整合成页面可消费的帧快照。
+ *
+ * 这个函数只负责把 left/right 两个槽位填好，让 shared 层继续只消费统一后的 payload。
+ */
+function mapFramePayload(
+  nativeHands : List<NativeDetectedHand> | null,
+  runtime : HandTrackerRuntimeInfo,
+  sourceWidth : number,
+  sourceHeight : number,
+  targetWidth : number,
+  targetHeight : number,
+  payload : HandTrackerFramePayload,
+  leftHand : HandTrackerHand,
+  rightHand : HandTrackerHand
+) : HandTrackerFramePayload {
+  payload.runtime = runtime
+  payload.leftHand = null
+  payload.rightHand = null
+
+  const count = readCollectionCount(nativeHands)
+  for (let i : Int = 0; i < count; i++) {
+    const nativeHand = readCollectionItem(nativeHands, i)
+    if (nativeHand == null || !nativeHand.visible) {
+      continue
+    }
+
+    if (nativeHand.label == 'left') {
+      payload.leftHand = createHandFromNative(nativeHand, sourceWidth, sourceHeight, targetWidth, targetHeight, leftHand)
+      continue
+    }
+
+    if (nativeHand.label == 'right') {
+      payload.rightHand = createHandFromNative(nativeHand, sourceWidth, sourceHeight, targetWidth, targetHeight, rightHand)
+    }
+  }
+
+  return payload
+}
+
+/**
+ * Android 预览宿主。
+ *
+ * 这一层只负责 View 的创建、挂载和销毁，不负责权限、会话和检测结果转换。
+ */
+class AndroidHandTrackerPreviewHost {
+  private containerView : FrameLayout | null = null
+  private previewView : PreviewView | null = null
+  private debugCallback : ((message : string) => void) | null = null
+
+  /**
+   * 初始化 Android 预览容器和 PreviewView。
+   *
+   * 这里只建立视图树，不会启动相机，也不会触发检测。
+   */
+  constructor() {
+    const activity = UTSAndroid.getUniActivity()
+    if (activity == null) {
+      throw new Error('无法获取当前 Activity，无法创建 Android 预览宿主')
+    }
+
+    const containerView = new FrameLayout(activity as Context)
+    const matchParentLayoutParams = new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+    containerView.setLayoutParams(matchParentLayoutParams)
+    this.containerView = containerView
+
+    const previewView = new PreviewView(activity as Context)
+    previewView.setLayoutParams(new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    this.previewView = previewView
+    containerView.addView(previewView)
+  }
+
+  /**
+   * 保存宿主级调试回调。
+   *
+   * 这样页面、会话和宿主三层可以共用同一条日志通道。
+   */
+  setDebugCallback(callback : ((message : string) => void) | null) : void {
+    this.debugCallback = callback
+  }
+
+  /**
+   * 输出宿主相关调试信息。
+   *
+   * 这里只做前缀区分，方便定位日志来源。
+   */
+  emitDebug(message : string) : void {
+    const callback = this.debugCallback
+    if (callback == null) {
+      return
+    }
+
+    callback('AndroidHandTrackerPreviewHost: ' + message)
+  }
+
+  /**
+   * 将容器挂到 UTS 原生视图元素上。
+   *
+   * 这里只处理 Android View 的父子关系，不碰会话状态。
+   */
+  mountTo(element : UniNativeViewElement) : void {
+    const containerView = this.containerView
+    if (containerView == null) {
+      throw new Error('Android 预览容器尚未初始化')
+    }
+
+    const parent = containerView.getParent()
+    if (parent != null && parent instanceof ViewGroup) {
+      ;(parent as ViewGroup).removeView(containerView)
+    }
+
+    element.bindAndroidView(containerView)
+  }
+
+  /**
+   * 暴露真正承载预览流的 PreviewView。
+   *
+   * 协调器只需要这个 View，不需要知道外层容器怎么组合。
+   */
+  getPreviewView() : PreviewView {
+    const previewView = this.previewView
+    if (previewView == null) {
+      throw new Error('Android 预览宿主尚未初始化')
+    }
+
+    return previewView
+  }
+
+  /**
+   * 销毁预览宿主并回收 Android View。
+   *
+   * 页面卸载或会话停止时都应走这里，避免留下悬挂视图。
+   */
+  destroy() : void {
+    const containerView = this.containerView
+    if (containerView != null) {
+      const previewView = this.previewView
+      if (previewView != null) {
+        containerView.removeView(previewView)
+      }
+
+      const parent = containerView.getParent()
+      if (parent != null && parent instanceof ViewGroup) {
+        ;(parent as ViewGroup).removeView(containerView)
+      }
+    }
+
+    this.containerView = null
+    this.previewView = null
+  }
+}
+
+/**
+ * Android 侧会话桥接层。
+ *
+ * 它只负责把 PreviewHost 和 Coordinator 串起来，不申请权限、不处理页面状态，
+ * 也不改检测结果的格式。
+ */
+class AndroidCameraSession {
+  private coordinator : HandTrackerCoordinator | null = null
+  private previewHost : AndroidHandTrackerPreviewHost | null = null
+  private debugCallback : ((message : string) => void) | null = null
+
+  /**
+   * 绑定会话级调试回调。
+   *
+   * 这一层只做透传，保证宿主和协调器共享同一条日志通道。
+   * 同时它不触发启动动作，只负责把上层传进来的日志入口记住。
+   */
+  bindDebug(callback : ((message : string) => void) | null) : void {
+    this.debugCallback = callback
+    const coordinator = this.coordinator
+    if (coordinator != null) {
+      coordinator.setDebugCallback(callback)
+    }
+    const previewHost = this.previewHost
+    if (previewHost != null) {
+      previewHost.setDebugCallback(callback)
+    }
+  }
+
+  /**
+   * 绑定预览宿主。
+   *
+   * 如果协调器已经存在，这里会立即把 PreviewView 交出去，减少后续重复查找。
+   */
+  bindPreviewHost(host : AndroidHandTrackerPreviewHost) : void {
+    this.previewHost = host
+    host.setDebugCallback(this.debugCallback)
+    const coordinator = this.coordinator
+    if (coordinator != null) {
+      coordinator.bindPreviewView(host.getPreviewView())
+    }
+  }
+
+  /**
+   * 绑定原生协调器。
+   *
+   * 这里只做对象串联，不创建额外业务状态。
+   */
+  bindCoordinator(coordinator : HandTrackerCoordinator) : void {
+    this.coordinator = coordinator
+    coordinator.setDebugCallback(this.debugCallback)
+    const previewHost = this.previewHost
+    if (previewHost != null) {
+      previewHost.setDebugCallback(this.debugCallback)
+      coordinator.bindPreviewView(previewHost.getPreviewView())
+    }
+  }
+
+  /**
+   * 启动 CameraX 和检测链路。
+   *
+   * 真正的绑定和分析逻辑仍由协调器完成，这里只是统一转交开始动作。
+   * 同时保留一个权限门闩，让原生协调器能先并行预热 detector 和 provider，
+   * 但在相机权限未到位前不进入最终 bind。
+   */
+  startTracking(
+    onPreviewReady : (width : Int, height : Int) => void,
+    onDetection : (hands : List<NativeDetectedHand>, width : Int, height : Int, timestampMs : Long) => void,
+    onError : (message : string) => void
+  ) : void {
+    const coordinator = this.coordinator
+    if (coordinator == null) {
+      throw new Error('Android CameraSession 尚未绑定追踪协调器')
+    }
+
+    coordinator.startTracking(onPreviewReady, onDetection, onError)
+  }
+
+  /**
+   * 设置相机权限状态。
+   *
+   * 协调器会先并行完成 detector / provider 的准备，这里只负责告诉它
+   * 是否已经可以进入最后的 CameraX 绑定。
+   */
+  setCameraPermissionGranted(granted : boolean) : void {
+    const coordinator = this.coordinator
+    if (coordinator != null) {
+      coordinator.setCameraPermissionGranted(granted)
+    }
+  }
+
+  /**
+   * 停止当前会话。
+   *
+   * 这里只做收口转发，不额外改页面状态或预览宿主状态。
+   */
+  stop() : void {
+    const coordinator = this.coordinator
+    if (coordinator != null) {
+      coordinator.stop()
+    }
+  }
+}
+
+/**
+ * Android 平台的主会话实现。
+ *
+ * 这个类本质上是一台状态机：
+ * - 负责接收页面生命周期入口；
+ * - 负责推进权限申请和相机启动；
+ * - 负责把原生检测结果整理成页面快照；
+ * - 负责错误、停止和重置的统一收口。
+ */
+export class HandTrackerSessionImpl implements HandTrackerSession {
+  private previewHost : AndroidHandTrackerPreviewHost | null = null
+  private cameraSession : AndroidCameraSession | null = null
+  private started : boolean = false
+  private appId : string = ''
+  private sequenceRunning : boolean = false
+  // 这里只表示权限是否已经就绪，不代表相机已经真正绑定成功。
+  private permissionGranted : boolean = false
+  // 这里只表示 CameraSession.startTracking 已经发起，不代表 CameraX 已 bind 完成。
+  private cameraStarted : boolean = false
+  private previewRunning : boolean = false
+  private detectionStarted : boolean = false
+  private reusableFramePayload : HandTrackerFramePayload = new HandTrackerFramePayload()
+  private reusableLeftHand : HandTrackerHand = new HandTrackerHand()
+  private reusableRightHand : HandTrackerHand = new HandTrackerHand()
+  private reusableRuntimeInfo : HandTrackerRuntimeInfo = new HandTrackerRuntimeInfo()
+  private onFrameCallback : ((payload : HandTrackerFramePayload) => void) | null = null
+  private onErrorCallback : ((message : string) => void) | null = null
+  private onDebugCallback : ((message : string) => void) | null = null
+  private firstFrameTimestamp : Long = (0).toLong()
+  private frameCount : Int = 0
+  private runtimeMessage : string = 'Android 正在准备 GPU 手部追踪。'
+  private sessionStage : string = SESSION_STAGE_IDLE
+  private viewportWidth : number = 0
+  private viewportHeight : number = 0
+
+  bindDebug(callback : ((message : string) => void) | null) : void {
+    this.onDebugCallback = callback
+
+    const previewHost = this.previewHost
+    if (previewHost != null) {
+      previewHost.setDebugCallback(callback)
+    }
+
+    const cameraSession = this.cameraSession
+    if (cameraSession != null) {
+      cameraSession.bindDebug(callback)
+    }
+  }
+
+  /**
+   * 绑定预览宿主并尝试推进启动流程。
+   *
+   * 页面把原生 element 传进来后，这里会创建或复用宿主，
+   * 然后顺手推进一次启动状态机。
+   */
+  bindPreviewHost(element : UniNativeViewElement) : void {
+    if (this.previewHost == null) {
+      this.previewHost = new AndroidHandTrackerPreviewHost()
+    }
+
+    const previewHost = this.previewHost
+    if (previewHost != null) {
+      previewHost.setDebugCallback(this.onDebugCallback)
+      previewHost.mountTo(element)
+    }
+
+    const cameraSession = this.cameraSession
+    if (cameraSession != null && previewHost != null) {
+      cameraSession.bindPreviewHost(previewHost)
+    }
+
+    this.transitionToStage(SESSION_STAGE_BINDING_PREVIEW, 'Android 正在绑定预览宿主。')
+    void this.runStartSequence()
+  }
+
+  /**
+   * 会话启动入口。
+   *
+   * 这里保存页面回调和视口信息，然后把启动状态置位。
+   * 真正的相机准备和绑定由 runStartSequence 统一推进。
+   */
+  start(options : HandTrackerSessionStartOptions) : void {
+    this.onFrameCallback = options.onFrame
+    this.onErrorCallback = options.onError
+    this.onDebugCallback = options.onDebug
+    if (options.appId.length == 0) {
+      this.handleSessionError('无法读取当前应用 appId，无法初始化 Android 手部模型路径', true)
+      return
+    }
+
+    this.appId = options.appId
+    const viewport = options.viewportProvider()
+    this.viewportWidth = viewport.width
+    this.viewportHeight = viewport.height
+    this.emitDebug('start')
+    this.started = true
+    this.permissionGranted = false
+    this.cameraStarted = false
+    this.previewRunning = false
+    this.detectionStarted = false
+    this.firstFrameTimestamp = (0).toLong()
+    this.frameCount = 0
+    this.transitionToStage(SESSION_STAGE_WAITING_PREVIEW_HOST_CREATED, 'Android 正在等待预览宿主创建。')
+    void this.runStartSequence()
+  }
+
+  /**
+   * 会话停止入口。
+   *
+   * 这里停掉会话状态，再统一清理预览链路和运行时状态。
+   */
+  stop() : void {
+    this.emitDebug('stop')
+    this.started = false
+    this.sequenceRunning = false
+    this.appId = ''
+    this.viewportWidth = 0
+    this.viewportHeight = 0
+    this.transitionToStage(SESSION_STAGE_IDLE, 'Android 追踪会话已停止。')
+    this.resetPreviewChain()
+  }
+
+  /**
+   * 推进启动串联。
+   *
+   * 这个方法现在只负责“并行预热 + 最终汇合”：
+   * - 先尽早准备 CameraSession / detector / provider；
+   * - 再异步申请相机权限；
+   * - 最终由权限、预览宿主和原生就绪状态一起决定是否真正启动 CameraX。
+   *
+   * 为什么要集中在这里：
+   * 避免启动逻辑散到多个回调里，后续排查状态问题会更困难。
+   */
+  private async runStartSequence() : Promise<void> {
+    if (!this.started || this.sequenceRunning) {
+      return
+    }
+
+    this.sequenceRunning = true
+    try {
+      const previewHost = this.previewHost
+      if (previewHost == null) {
+        this.transitionToStage(SESSION_STAGE_WAITING_PREVIEW_HOST_CREATED, 'Android 正在等待预览宿主创建。')
+      }
+
+      this.prepareSession()
+
+      const cameraSession = this.cameraSession
+      if (cameraSession == null) {
+        throw new Error('Android CameraSession 创建失败')
+      }
+
+      if (!this.cameraStarted) {
+        this.cameraStarted = true
+        this.transitionToStage(SESSION_STAGE_PREPARING_CAMERA, 'Android 正在并行预热相机与 GPU 手部追踪。')
+        // 先把原生准备链路拉起来，让 detector / provider 可以和权限请求并行推进。
+        cameraSession.startTracking(
+          (width : Int, height : Int) : void => {
+            if (!this.started) {
+              return
+            }
+
+            this.previewRunning = true
+            this.transitionToStage(SESSION_STAGE_PREVIEW_RUNNING, 'Android GPU 预览已启动。')
+            this.emitPreviewRuntime(width, height)
+            void this.runStartSequence()
+          },
+          (nativeHands : List<NativeDetectedHand>, previewWidth : Int, previewHeight : Int, _timestampMs : Long) : void => {
+            if (!this.started) {
+              return
+            }
+
+            if (!this.detectionStarted) {
+              this.detectionStarted = true
+              this.transitionToStage(SESSION_STAGE_DETECTING, 'Android GPU 追踪运行中。')
+            }
+
+            const runtime = this.buildRuntimeInfo(previewWidth, previewHeight)
+            const targetWidth = this.viewportWidth > 0 ? this.viewportWidth : previewWidth
+            const targetHeight = this.viewportHeight > 0 ? this.viewportHeight : previewHeight
+            this.emitFrame(
+              mapFramePayload(
+                nativeHands,
+                runtime,
+                previewWidth,
+                previewHeight,
+                targetWidth,
+                targetHeight,
+                this.reusableFramePayload,
+                this.reusableLeftHand,
+                this.reusableRightHand
+              )
+            )
+          },
+          (message : string) : void => {
+            this.handleSessionError(message, true)
+          }
+        )
+      }
+
+      if (!this.permissionGranted) {
+        this.transitionToStage(SESSION_STAGE_REQUESTING_PERMISSION, 'Android 正在申请相机权限。')
+        await this.ensureCameraPermission()
+        if (!this.started) {
+          return
+        }
+
+        this.permissionGranted = true
+      }
+
+      if (!this.started) {
+        return
+      }
+
+      cameraSession.setCameraPermissionGranted(true)
+    } catch (error) {
+      this.handleSessionError(this.normalizeErrorMessage(error, 'Android GPU 启动失败'), true)
+    } finally {
+      this.sequenceRunning = false
+    }
+  }
+
+  /**
+   * 准备会话依赖。
+   *
+   * 这里只负责创建和串联对象，不真正开始相机和检测。
+   */
+  private prepareSession() : void {
+    if (this.cameraSession == null) {
+      const cameraSession = new AndroidCameraSession()
+      const coordinator = new HandTrackerCoordinator(this.appId)
+      cameraSession.bindCoordinator(coordinator)
+      cameraSession.bindDebug(this.onDebugCallback)
+      this.cameraSession = cameraSession
+    }
+
+    const cameraSession = this.cameraSession
+    if (cameraSession != null) {
+      cameraSession.bindDebug(this.onDebugCallback)
+      const previewHost = this.previewHost
+      if (previewHost != null) {
+        cameraSession.bindPreviewHost(previewHost)
+      }
+    }
+  }
+
+  /**
+   * 申请相机权限。
+   *
+   * 这里把权限差异和系统回调都收口在一个位置，避免多处重复判断。
+   */
+  private async ensureCameraPermission() : Promise<void> {
+    const activity = UTSAndroid.getUniActivity()
+    if (activity == null) {
+      throw new Error('无法获取当前 Activity，无法申请相机权限')
+    }
+
+    if (UTSAndroid.checkSystemPermissionGranted(activity, [Manifest.permission.CAMERA])) {
+      return
+    }
+
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+      return
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      UTSAndroid.requestSystemPermission(
+        activity,
+        [Manifest.permission.CAMERA],
+        (allRight : boolean, _grantedList : Array<string>) => {
+          if (allRight) {
+            resolve()
+            return
+          }
+
+          reject(new Error('相机权限未授予'))
+        },
+        (_doNotAskAgain : boolean, _grantedList : Array<string>) => {
+          reject(new Error('相机权限未授予'))
+        }
+      )
+    })
+  }
+
+  /**
+   * 预览刚启动时，先补一帧只包含 runtime 的快照。
+   *
+   * 这样页面能尽快看到分辨率和后端状态，不必等到第一帧检测结果返回。
+   */
+  private emitPreviewRuntime(width : Int, height : Int) : void {
+    const callback = this.onFrameCallback
+    if (callback == null) {
+      return
+    }
+
+    const payload = this.reusableFramePayload
+    payload.leftHand = null
+    payload.rightHand = null
+    payload.runtime = toRuntimeInfo(width, height, 0, this.runtimeMessage, this.reusableRuntimeInfo, 'GPU', '后端: Android UTS GPU')
+    callback(payload)
+  }
+
+  /**
+   * 构造运行时信息。
+   *
+   * 这里只计算 fps 和 runtime 文案，不参与页面展示规则。
+   */
+  private buildRuntimeInfo(width : Int, height : Int) : HandTrackerRuntimeInfo {
+    this.frameCount += 1
+    const now : Long = SystemClock.uptimeMillis()
+    if (this.firstFrameTimestamp <= (0).toLong()) {
+      this.firstFrameTimestamp = now
+    }
+
+    const elapsedMs : number = Number.from(now - this.firstFrameTimestamp)
+    const elapsed = Math.max(elapsedMs, 1)
+    const fps = this.frameCount > 1 ? ((this.frameCount - 1) * 1000 / elapsed) : 0
+    return toRuntimeInfo(width, height, fps, this.runtimeMessage, this.reusableRuntimeInfo, 'GPU', '后端: Android UTS GPU')
+  }
+
+  /**
+   * 向页面层发出一帧。
+   *
+   * 这里不做额外转换，保持会话层到页面层的出口尽量薄。
+   */
+  private emitFrame(payload : HandTrackerFramePayload) : void {
+    const callback = this.onFrameCallback
+    if (callback != null) {
+      callback(payload)
+    }
+  }
+
+  /**
+   * 统一错误输出。
+   *
+   * 这里同时更新状态、输出日志、通知页面，避免错误路径漏掉任一侧。
+   */
+  private emitError(message : string) : void {
+    this.transitionToStage(SESSION_STAGE_ERROR, message)
+    errorLog(message)
+    const callback = this.onErrorCallback
+    if (callback != null) {
+      callback(message)
+    }
+  }
+
+  /**
+   * 统一处理会话错误。
+   *
+   * stopSession 表示这个错误是否应该直接把整条会话收掉。
+   */
+  private handleSessionError(message : string, stopSession : boolean) : void {
+    this.emitDebug('error')
+    this.emitError(message)
+    if (!stopSession) {
+      return
+    }
+
+    this.stop()
+  }
+
+  /**
+   * 统一切换会话状态。
+   *
+   * 这里同时更新状态码和对外可见的说明文案，避免页面看到不一致的信息。
+   */
+  private transitionToStage(stage : string, message : string) : void {
+    this.sessionStage = stage
+    this.runtimeMessage = message
+  }
+
+  /**
+   * 停止后清理预览链路和会话标记。
+   *
+   * 这一步会同时回收 CameraSession 和 PreviewHost，防止页面再次进入时复用旧对象。
+   */
+  private resetPreviewChain() : void {
+    this.sequenceRunning = false
+    this.permissionGranted = false
+    this.cameraStarted = false
+    this.previewRunning = false
+    this.detectionStarted = false
+    this.firstFrameTimestamp = (0).toLong()
+    this.frameCount = 0
+
+    const cameraSession = this.cameraSession
+    if (cameraSession != null) {
+      cameraSession.stop()
+      this.cameraSession = null
+    }
+
+    if (this.previewHost != null) {
+      this.previewHost.destroy()
+      this.previewHost = null
+    }
+  }
+
+  /**
+   * 把异常信息转成稳定文案。
+   *
+   * 当异常本身没有 message 时，使用 fallback，避免日志和页面出现空字符串。
+   */
+  private normalizeErrorMessage(error : Throwable, fallback : string) : string {
+    const message = error.message
+    if (message != null && message.length > 0) {
+      return message
+    }
+
+    return fallback
+  }
+
+  /**
+   * 输出会话级调试信息。
+   *
+   * 这里不额外拼接前缀，保持上层消息尽量接近业务语义本身。
+   */
+  private emitDebug(message : string) : void {
+    const callback = this.onDebugCallback
+    if (callback == null) {
+      return
+    }
+
+    callback(message)
+  }
+}
+
+/**
+ * Android 平台对外暴露的最小工厂函数。
+ *
+ * 这个函数必须放在 app-android 入口文件里，才能进入同一个原生包名的 Kotlin 生成物，
+ * 让 Android Studio 侧能够直接解析到 `uts.sdk.modules.handTracker.createHandTrackerSession`。
+ */
+export function createHandTrackerSession() : HandTrackerSession {
+  return new HandTrackerSessionImpl()
+}

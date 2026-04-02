@@ -1,0 +1,54 @@
+/**
+ * hand-tracker 插件对外协议定义。
+ *
+ * 这一层只描述“插件能提供什么能力”，不放任何 Android 实现细节。
+ * 页面或项目适配层应始终依赖这里定义的稳定接口，而不是直接依赖平台层类名。
+ */
+
+export class HandTrackerViewport {
+  width : number = 0
+  height : number = 0
+
+  constructor(width : number = 0, height : number = 0) {
+    this.width = width
+    this.height = height
+  }
+}
+
+export class HandTrackerRuntimeInfo {
+  backendName : string = 'CPU'
+  backendLabel : string = '后端: Android UTS CPU'
+  fpsLabel : string = '帧率: --'
+  resolutionLabel : string = '分辨率: --'
+  message : string = ''
+}
+
+export class HandTrackerHand {
+  label : string = ''
+  visible : boolean = false
+  confidence : number = 0
+  centerX : number = 0
+  centerY : number = 0
+  size : number = 0
+}
+
+export class HandTrackerFramePayload {
+  leftHand : HandTrackerHand | null = null
+  rightHand : HandTrackerHand | null = null
+  runtime : HandTrackerRuntimeInfo = new HandTrackerRuntimeInfo()
+}
+
+export type HandTrackerSessionStartOptions = {
+  viewportProvider: (() => HandTrackerViewport)
+  appId: string
+  onFrame: (payload : HandTrackerFramePayload) => void
+  onError: (message : string) => void
+  onDebug: (message : string) => void
+}
+
+export interface HandTrackerSession {
+  bindDebug(callback : ((message : string) => void) | null) : void
+  bindPreviewHost(element : UniNativeViewElement) : void
+  start(options : HandTrackerSessionStartOptions) : void
+  stop() : void
+}

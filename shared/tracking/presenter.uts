@@ -25,32 +25,49 @@ import { HandPoint, TrackingFrame, TrackingRuntimeInfo, TrackingSnapshot } from 
  * - presenter 负责决定页面此刻应该怎么显示。
  */
 export class TrackingPresenter {
+  /**
+   * 当前页面追踪状态。
+   *
+   * 这个状态只负责驱动页面文案，不直接影响 detector 行为。
+   */
   private trackingState : string = TRACKING_STATE_IDLE
+  // 最近一次收到的运行时信息，页面调试面板直接从这里读。
   private runtimeInfo : TrackingRuntimeInfo = new TrackingRuntimeInfo()
+  // 当前帧的左右手结果。
   private currentFrame : TrackingFrame = new TrackingFrame()
+  // 页面快照复用缓存，避免每次 createSnapshot 都新建 TrackingSnapshot。
+  private snapshotCache : TrackingSnapshot = new TrackingSnapshot()
+  // 连续无手帧计数，用于避免单帧漏检导致页面抖动。
   private noHandsFrameCount : number = 0
+  // 左右手大小的平滑代理值。
   private leftScaleProxy : number = MARKER_REFERENCE_SIZE
   private rightScaleProxy : number = MARKER_REFERENCE_SIZE
 
-  markStarting() : void {
+  markStarting(message : string = '正在启动追踪链路。') : void {
+    // 启动阶段只切状态，不重置 runtime，避免页面瞬间闪回旧数据。
     this.trackingState = TRACKING_STATE_STARTING
+    this.runtimeInfo.message = message
   }
 
   markError(message : string) : void {
+    // 错误状态下把 message 一并写入，页面调试面板可以直接展示。
     this.trackingState = TRACKING_STATE_ERROR
     this.runtimeInfo.message = message
   }
 
   reset() : void {
+    // 会话结束或宿主销毁时，把所有页面状态回到初始值。
     this.trackingState = TRACKING_STATE_IDLE
     this.runtimeInfo = new TrackingRuntimeInfo()
     this.currentFrame = new TrackingFrame()
+    this.snapshotCache = new TrackingSnapshot()
     this.noHandsFrameCount = 0
     this.leftScaleProxy = MARKER_REFERENCE_SIZE
     this.rightScaleProxy = MARKER_REFERENCE_SIZE
   }
 
   applyFrame(frame : TrackingFrame, runtimeInfo : TrackingRuntimeInfo | null = null) : void {
+    // 当前帧先覆盖进来，后续页面快照会从这里读取。
     this.currentFrame = frame
 
     if (runtimeInfo != null) {
@@ -108,7 +125,8 @@ export class TrackingPresenter {
   }
 
   createSnapshot() : TrackingSnapshot {
-    const snapshot = new TrackingSnapshot()
+    // 页面只拿这一份快照，不需要每次都新建完整对象。
+    const snapshot = this.snapshotCache
     snapshot.trackingState = this.trackingState
     snapshot.statusText = resolveStatusText(this.trackingState)
     snapshot.backendText = this.runtimeInfo.backendLabel

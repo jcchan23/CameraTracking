@@ -1,55 +1,63 @@
 <template>
 	<view class="page">
+		<!-- #ifdef APP-ANDROID -->
+		<NativePreviewHost
+			class="native-preview-host"
+			@previewReady="handlePreviewInit"
+			@previewDestroyed="handlePreviewDestroyed"
+		></NativePreviewHost>
+		<!-- #endif -->
+
+		<!-- #ifdef WEB -->
 		<view class="web-preview-mask"></view>
+		<!-- #endif -->
 
-		<view class="marker-layer">
-			<view v-if="leftGlowVisible" class="marker marker-glow marker-left-glow" :style="leftGlowStyle"></view>
-			<view v-if="rightGlowVisible" class="marker marker-glow marker-right-glow" :style="rightGlowStyle"></view>
-			<view v-if="leftMarkerVisible" class="marker marker-solid marker-left-solid" :style="leftMarkerStyle"></view>
-			<view v-if="rightMarkerVisible" class="marker marker-solid marker-right-solid" :style="rightMarkerStyle"></view>
-		</view>
-
-		<view class="status-panel">
-			<view class="status-chip" :class="'state-' + trackingState">
-				<text class="status-chip-text">{{ statusText }}</text>
-			</view>
-
-			<view class="runtime-chip" :class="runtimeChipClass">
-				<text class="runtime-chip-text">{{ backendText }}</text>
-			</view>
-
-			<view class="debug-chip">
-				<text class="debug-chip-line">{{ fpsText }}</text>
-				<text class="debug-chip-line">{{ resolutionText }}</text>
-				<text class="debug-chip-line">{{ runtimeMessage }}</text>
-			</view>
-		</view>
+		<TrackingMarkerLayer
+			:markerVersion="markerVersion"
+			:leftGlowVisible="leftMarker.glowVisible"
+			:rightGlowVisible="rightMarker.glowVisible"
+			:leftVisible="leftMarker.visible"
+			:rightVisible="rightMarker.visible"
+			:leftGlowStyle="leftMarker.glowStyle"
+			:rightGlowStyle="rightMarker.glowStyle"
+			:leftMarkerStyle="leftMarker.markerStyle"
+			:rightMarkerStyle="rightMarker.markerStyle"
+		></TrackingMarkerLayer>
+		<TrackingStatusPanel
+			:trackingState="statusSnapshot.trackingState"
+			:statusText="statusSnapshot.statusText"
+			:backendText="statusSnapshot.backendText"
+			:fpsText="statusSnapshot.fpsText"
+			:resolutionText="statusSnapshot.resolutionText"
+			:runtimeMessage="statusSnapshot.runtimeMessage"
+			:runtimeChipClass="statusSnapshot.runtimeChipClass"
+			:statusVersion="statusVersion"
+		></TrackingStatusPanel>
 	</view>
 </template>
 
 <script setup lang="uts">
 	import { useTrackingPage } from './index.uts'
+	import TrackingMarkerLayer from './components/tracking-marker-layer.uvue'
+	import TrackingStatusPanel from './components/tracking-status-panel.uvue'
+	// #ifdef APP-ANDROID
+	// 原生预览宿主只在 Android 编译目标下挂载，H5 不会编译进来。
+	import NativePreviewHost from '../../services/tracker/android/android-preview-host.uvue'
+	// #endif
 	const trackingPage = useTrackingPage()
-	const trackingState = trackingPage.trackingState
-	const statusText = trackingPage.statusText
-	const backendText = trackingPage.backendText
-	const fpsText = trackingPage.fpsText
-	const resolutionText = trackingPage.resolutionText
-	const runtimeMessage = trackingPage.runtimeMessage
-	const runtimeChipClass = trackingPage.runtimeChipClass
-	const leftMarkerVisible = trackingPage.leftMarkerVisible
-	const rightMarkerVisible = trackingPage.rightMarkerVisible
-	const leftGlowVisible = trackingPage.leftGlowVisible
-	const rightGlowVisible = trackingPage.rightGlowVisible
-	const leftMarkerStyle = trackingPage.leftMarkerStyle
-	const rightMarkerStyle = trackingPage.rightMarkerStyle
-	const leftGlowStyle = trackingPage.leftGlowStyle
-	const rightGlowStyle = trackingPage.rightGlowStyle
+	const statusSnapshot = trackingPage.statusSnapshot
+	const statusVersion = trackingPage.statusVersion
+	const leftMarker = trackingPage.leftMarker
+	const rightMarker = trackingPage.rightMarker
+	const markerVersion = trackingPage.markerVersion
 	const handlePageReady = trackingPage.handlePageReady
 	const handlePageShow = trackingPage.handlePageShow
 	const handlePageHide = trackingPage.handlePageHide
 	const handlePageUnload = trackingPage.handlePageUnload
+	const handlePreviewInit = trackingPage.handlePreviewInit
+	const handlePreviewDestroyed = trackingPage.handlePreviewDestroyed
 
+	// 页面生命周期只做转发，不在这里写任何追踪逻辑。
 	// @ts-ignore uni-app x 页面生命周期由运行时注入
 	onReady(() => {
 		handlePageReady()
@@ -93,119 +101,15 @@
 		pointer-events: none;
 	}
 
-	/* 手部 marker 覆盖层：始终覆盖在摄像头画面上方，不参与页面布局流。 */
-	.marker-layer {
+	/* 原生预览宿主：只承担相机画面的承载职责。 */
+	.native-preview-host {
 		position: fixed;
 		left: 0;
 		top: 0;
 		right: 0;
 		bottom: 0;
-		z-index: 9;
-	}
-
-	/* marker 基础样式：位置由运行时动态计算并直接写入 style 字符串。 */
-	.marker {
-		position: absolute;
-		border-radius: 999px;
-	}
-
-	/* 发光层与实心层分离，方便既保留提示感，又不让圆点太刺眼。 */
-	.marker-glow {
-		opacity: 0.14;
-	}
-
-	.marker-solid {
-		opacity: 1;
-	}
-
-	/* 左右手分别使用不同颜色，降低维护者排查“哪只手显示异常”时的识别成本。 */
-	.marker-left-glow,
-	.marker-left-solid {
-		background-color: #1f6fff;
-	}
-
-	.marker-right-glow,
-	.marker-right-solid {
-		background-color: #ff8a1f;
-	}
-
-	/* 左上状态面板：固定在页面左上，和摄像头画面脱离布局流，避免被内容挤动。 */
-	.status-panel {
-		position: fixed;
-		left: 24rpx;
-		top: 24rpx;
-		z-index: 10;
-		flex-direction: column;
-		align-items: flex-start;
-	}
-
-	/* 三种信息胶囊共用同一套基础盒模型，属于模板里静态 class 直接命中的样式。 */
-	.status-chip,
-	.runtime-chip,
-	.debug-chip {
-		margin-bottom: 14rpx;
-		padding: 16rpx 20rpx;
-		border-radius: 22rpx;
-		background-color: rgba(15, 23, 42, 0.72);
-		box-shadow: 0 14rpx 34rpx rgba(0, 0, 0, 0.16);
-	}
-
-	/* 调试块单独限制宽度，避免长文本直接铺满上方区域。 */
-	.debug-chip {
-		max-width: 430rpx;
-	}
-
-	/* 文本样式集中放在一起，维护时能快速知道字号和颜色在哪里改。 */
-	.status-chip-text,
-	.runtime-chip-text,
-	.debug-chip-line {
-		color: #ffffff;
-	}
-
-	.status-chip-text,
-	.runtime-chip-text {
-		font-size: 24rpx;
-		font-weight: 600;
-	}
-
-	/* 调试文本单独控制行高和透明度，避免和状态标题文本混在一起难找。 */
-	.debug-chip-line {
-		font-size: 22rpx;
-		line-height: 32rpx;
-		opacity: 0.88;
-	}
-
-	/* 状态颜色变体：模板里不会写完整类名，但会由 trackingState 在运行时动态命中。 */
-	.state-idle {
-		background-color: rgba(71, 85, 105, 0.86);
-	}
-
-	.state-starting {
-		background-color: rgba(14, 116, 144, 0.9);
-	}
-
-	.state-running {
-		background-color: rgba(22, 163, 74, 0.9);
-	}
-
-	.state-no-hands {
-		background-color: rgba(202, 138, 4, 0.92);
-	}
-
-	.state-error {
-		background-color: rgba(220, 38, 38, 0.92);
-	}
-
-	/* 运行时颜色变体：模板里不会写完整类名，但会由 runtimeChipClass 在运行时动态命中。 */
-	.runtime-chip-idle {
-		background-color: rgba(51, 65, 85, 0.86);
-	}
-
-	.runtime-chip-cpu {
-		background-color: rgba(59, 130, 246, 0.88);
-	}
-
-	.runtime-chip-gpu {
-		background-color: rgba(139, 92, 246, 0.9);
+		z-index: 0;
+		width: 100%;
+		height: 100%;
 	}
 </style>

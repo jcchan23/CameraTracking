@@ -1,9 +1,9 @@
 /**
  * 手部追踪共享常量。
  *
- * 这些常量来自 v1 已验证过的交互经验值。
- * 它们不属于某个平台的私有实现，而是页面体验层的“稳定规则”，
- * 因此迁移到 v2 后继续作为跨端共用配置保留在 shared 层。
+ * 这些常量定义页面追踪体验使用的固定阈值与缩放规则。
+ * 它们放在 shared 层，是为了让页面、service 和平台适配层共享同一套规则，
+ * 避免各层重复维护相同的数值。
  */
 export const NO_HANDS_GRACE_COUNT : number = 3
 export const MARKER_REFERENCE_SIZE : number = 0.24

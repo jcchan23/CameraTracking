@@ -1,0 +1,60 @@
+<template>
+	<view class="marker-layer">
+		<view v-if="props.leftGlowVisible" class="marker marker-glow marker-left-glow" :style="props.leftGlowStyle"></view>
+		<view v-if="props.rightGlowVisible" class="marker marker-glow marker-right-glow" :style="props.rightGlowStyle"></view>
+		<view v-if="props.leftVisible" class="marker marker-solid marker-left-solid" :style="props.leftMarkerStyle"></view>
+		<view v-if="props.rightVisible" class="marker marker-solid marker-right-solid" :style="props.rightMarkerStyle"></view>
+	</view>
+</template>
+
+<script setup lang="uts">
+	const props = defineProps<{
+		markerVersion : number
+		leftGlowVisible : boolean
+		rightGlowVisible : boolean
+		leftVisible : boolean
+		rightVisible : boolean
+		leftGlowStyle : string
+		rightGlowStyle : string
+		leftMarkerStyle : string
+		rightMarkerStyle : string
+	}>()
+</script>
+
+<style>
+	/* 手部 marker 覆盖层：始终覆盖在摄像头画面上方，不参与页面布局流。 */
+	.marker-layer {
+		position: fixed;
+		left: 0;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		z-index: 9;
+	}
+
+	/* marker 基础样式：位置由运行时动态计算并直接写入 style 字符串。 */
+	.marker {
+		position: absolute;
+		border-radius: 999px;
+	}
+
+	/* 发光层与实心层分离，方便既保留提示感，又不让圆点太刺眼。 */
+	.marker-glow {
+		opacity: 0.14;
+	}
+
+	.marker-solid {
+		opacity: 1;
+	}
+
+	/* 左右手分别使用不同颜色，降低维护者排查“哪只手显示异常”时的识别成本。 */
+	.marker-left-glow,
+	.marker-left-solid {
+		background-color: #1f6fff;
+	}
+
+	.marker-right-glow,
+	.marker-right-solid {
+		background-color: #ff8a1f;
+	}
+</style>

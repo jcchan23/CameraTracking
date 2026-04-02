@@ -5,6 +5,11 @@
  * 这些模型的目标不是“完整还原 detector 的所有输出”，而是只保留页面真正消费的那部分数据。
  */
 export class HandPoint {
+  /**
+   * 页面最终直接消费的手部点位。
+   *
+   * x/y 是页面坐标，confidence/size 是给 UI 做稳定展示和缩放使用的辅助值。
+   */
   x : number = 0
   y : number = 0
   confidence : number = 0
@@ -19,6 +24,7 @@ export class HandPoint {
 }
 
 export class TrackingFrame {
+  // 页面只关心左右手两个槽位，所以这里直接固定成左右手结构。
   leftHand : HandPoint | null = null
   rightHand : HandPoint | null = null
 }
@@ -30,6 +36,7 @@ export class TrackingFrame {
  * 同时也方便平台层分别组织数据。
  */
 export class TrackingRuntimeInfo {
+  // 调试面板展示的运行时信息，尽量保证字段始终有稳定默认值。
   backendLabel : string = '后端: --'
   fpsLabel : string = '帧率: --'
   resolutionLabel : string = '分辨率: --'
@@ -37,6 +44,7 @@ export class TrackingRuntimeInfo {
 }
 
 export class TrackingViewport {
+  // 当前页面可视区域尺寸，适合做坐标钳制和归一化。
   width : number = 0
   height : number = 0
 
@@ -53,6 +61,7 @@ export class TrackingViewport {
  * 这样 handedness 稳定、坐标钳制和页面 marker 计算都能在同一条链路里复用。
  */
 export class DetectedHand {
+  // 这是“稳定化前”的单手结果，平台适配层先映射到它，再交给 shared 算法处理。
   label : string = ''
   confidence : number = 0
   centerX : number = 0
@@ -68,6 +77,7 @@ export class DetectedHand {
  * 这样页面更新入口更少，也更不容易在重构时漏掉某个联动字段。
  */
 export class TrackingSnapshot {
+  // 页面模板最终绑定的完整状态快照。
   trackingState : string = ''
   statusText : string = ''
   backendText : string = '后端: --'
@@ -80,6 +90,7 @@ export class TrackingSnapshot {
 }
 
 export class StabilizedHands {
+  // 稳定器输出的是左/右两只手，后面再折叠成 TrackingFrame。
   left : DetectedHand | null = null
   right : DetectedHand | null = null
 }
